@@ -1,0 +1,1521 @@
+---
+title: "Comparison of T-cell subtypes, proteome and CTA"
+author: "Lavanya"
+
+output:
+  BiocStyle::html_document:
+    toc_float: true
+vignette: >
+  %\VignetteIndexEntry{Evaluating differential expression patterns in immune subsets from p2104 GeoMX project}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  message = FALSE, warning = FALSE)
+```
+
+# OBJECTIVE OF THE STUDY
+
+The objective of this study is to show that spatial localization of T cells and proximity to tumor play a crucial role in their expression profile. 
+
+- Calling for packages 
+
+```{r}
+packagelist <- c("reshape", "ggrepel", "brms","lmerTest","ggplot2","dplyr","tidyverse", "ComplexHeatmap",  "readxl","RColorBrewer","GetoptLong","corrplot","conflicted", "EnvStats", "car", "colorRamp2", "ez", "tibble", "janitor","igraph", "plotly","factoextra", "reprtree", "mixOmics", "caret", "randomForest", "smplot2", "clusterProfiler", "msigdbr", "ggpubr", "pals")
+
+for (i in packagelist){
+ suppressPackageStartupMessages(library(i, character.only = TRUE))
+}
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer("qq", "GetoptLong")
+conflict_prefer("select", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflicts_prefer(plotly::layout)
+```
+
+# Colour palettes used
+
+```{r}
+myPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
+
+cols2 <- brewer.pal(n = 9, name = "Spectral")
+pal1 <- colorRampPalette(cols2) (20)
+
+cols3 <- brewer.pal(n = 11, name = "PuRd")
+pal2 <- colorRampPalette(cols3)
+
+customGreen0 = "#DeF7E9"
+customGreen = "#71CA97"
+customRed = "#ff7f7f"
+
+cols = c("Enriched in High" = "deeppink1", "Enriched in Low" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+
+
+sizes <- c("High" = 2, "Low" = 2, "ns" = 1, "DE" = 2)
+
+my_colour = list(Direction = c("High" = "#5977ff", "Low" = "#f74747"), `Within the tumor` = c("Away" = "#1B9E77", "Within"="#D95F02"))
+heatmap_color <- colorRampPalette(c("green", "black", "firebrick3"))(50)
+```
+
+## Compare Means analysis functions
+
+```{r}
+decide_test <- function(p_value) {
+  test_type <- ifelse(p_value < 0.05, "wilcox", "t")
+  return(test_type)
+}
+
+perform_test <- function(New) {
+  grouped_df <- New %>%
+    group_by(SegmentLabelNew)
+ 
+  shapiro_results <- grouped_df %>%
+    summarise_if(is.numeric, ~ shapiro.test(.)$p.value)
+  
+  test_types <- shapiro_results %>% ungroup()%>% as.data.frame()%>% 
+     summarise(across(everything(), decide_test)) 
+  
+  finaldf <- test_types %>% ungroup()%>% t()  %>% as.data.frame() %>% drop_na() %>%  mutate(method = ifelse(V1 == "t" & V2 == "t", "t.test", "wilcox"))
+
+
+  obj <- list()
+  
+  for (i in rownames(finaldf)) {
+    smalldf <- New %>% select(PATID, SegmentLabelNew, i)  %>% pivot_wider(names_from = SegmentLabelNew, values_from = i)
+   
+    
+    if(finaldf[i,3] == "wilcox") {
+      test_result <- wilcox.test(smalldf[[2]], smalldf[[3]], paired = T)
+      obj[[i]] <-  cbind(biomarker = i, method = "Wilcoxon", Pvalue = test_result$p.value)
+      
+      } else if(finaldf[i,3] == "t.test") {
+      test_result <- t.test(smalldf[[2]], smalldf[[3]], paired = T)
+      obj[[i]] = cbind(biomarker =i,  method = "T Test",Pvalue = test_result$p.value)
+      } else {
+     stop("Invalid test type. Choose either 'wilcox' or 't'.")
+      }
+  
+  }
+  
+  result <- do.call(rbind,obj)%>% as.data.frame()
+
+return(result)
+}
+```
+
+# Input files
+
+## Expression files
+
+```{r}
+conflicts_prefer(reshape2::melt)
+CTA <- readxl::read_xlsx("Datafiles/Project_3_immune_MTC_MTH.Dec2023 names updated.xlsx") %>% as.data.frame()  %>% mutate(Within.the.tumor = ifelse(Within.the.tumor.postSE == "Tumor-rich", "Tumor-rich", "Tumor-sparse")) %>% relocate(Within.the.tumor, .after = "CoreID") 
+
+n <- 1481 ## total number of probes excluding NPC
+s <- ncol(CTA)-n 
+startwithNPC <- s-1 
+e <- ncol(CTA)
+
+head(CTA[,s:e])
+
+Proteome <- readxl::read_xlsx("Datafiles/Project2_Protein_all immune subtypes.Dec2023 names updated.xlsx") %>% as.data.frame()  %>% rename( "Within.the.tumor"="Within.the.tumor_June2023") 
+
+np <- 62 ## no of markers (-NF1)
+e <- ncol(Proteome)
+s <- e-np+1
+
+head(Proteome[,s:e])
+
+tumorprotein <- read_excel("Datafiles/PCD20.Dec2023 names updated.xlsx") %>% as.data.frame() 
+tumormrna <- read_excel("Datafiles/MCD20.Dec2023 names updated.xlsx") %>% as.data.frame() 
+
+head(tumormrna)
+```
+
+## Clinical data updated November 2022
+
+```{r} 
+newclinicaldata <- read_excel("Datafiles/BLISS DATABASE NOVEMBER 2022 - NBIS.xlsx") %>% as.data.frame() 
+```
+
+## IHC analysis file
+
+```{r} 
+ihcanalysis <- read_excel("Datafiles/RESULTS IHC.xlsx") %>% as.data.frame()
+```
+
+
+# MAIN ANALYSIS1 - Comparison of the different infiltrating T-cell subtypes within tumor, Protein 
+
+In this step, we are staying that given the expression of nth variable, define the variable as a function of tumor region while accounting for patient replication bias. 
+
+In the chunk 
+- Here change the coeff - threshold for the change you want to see 
+- Here change the fdr pvalue thresholds 
+- Here change the reflevel you wish to use as reference
+
+
+```{r dev = "png"}
+source("Function list.R") 
+np <- 62 #NF1 removed
+e <- ncol(Proteome)
+s <- e-np+1
+annot_file <- c("SegmentLabel")
+```
+
+## Total Helper vs  Cytotoxic
+
+```{r dev = "png"}
+Proteome_subset<-  Proteome %>% filter(Within.the.tumor=="Tumor-rich") %>% mutate(NewLabel = substring(SegmentLabelNew, 1, 3)) %>% relocate(NewLabel, .before = SegmentLabelNew)
+np <- 62 #NF1 removed
+e <- ncol(Proteome_subset)
+s <- e-np+1
+annot_file <- c("NewLabel")
+
+cols = c("Enriched in PTC" = "deeppink1", "Enriched in PTH" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+volcano_plots_binary(data=Proteome_subset, subset=TRUE, ROI_type = "Tumor-rich", formula = "~ NewLabel+(1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "PTH", contrastlevel = "PTC", subset_cat = "Within.the.tumor", binary_group = "NewLabel", name = "TCvsTH" , ctrl_biom=TRUE)
+
+newlist <- DR_proteins_for_TCvsTH %>% filter(DE=="DE")
+
+listb <- Proteome_subset %>% select(PATID, NewLabel, matches(newlist$biomarker)) %>% group_by(PATID,NewLabel) %>% summarise_if(is.numeric, mean, na.rm = TRUE)
+
+np <- 32 #NF1 removed
+e <- ncol(listb)
+s <- e-np+1
+annot_file <- c("NewLabel")
+
+gcor <- cor(listb[,s:e], method="spearman")
+corrplot.mixed(gcor,outline = F, order="FPC",addrect = 2, rect.col = "black", rect.lwd = 1, tl.col = "black", tl.cex = 0.5, cl.cex = 0.5, sig.level = 0.05, tl.pos = 'lt', lower = 'color',upper = 'pie')
+
+# Proteome_subset %>% ggplot(aes(x=LAG3, y = PD.L1, color = SegmentLabelNew, fill = SegmentLabelNew)) +
+#   geom_point()+
+#   sm_statCorr( corr_method = 'spearman')+
+#   scale_fill_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+#   scale_colour_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+#   theme(legend.position = "top") 
+# 
+# Proteome_subset %>% ggplot(aes(x=LAG3, y = PD.L2, color = SegmentLabelNew, fill = SegmentLabelNew)) +
+#   geom_point()+
+#   sm_statCorr( corr_method = 'spearman')+
+#   scale_fill_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+#   scale_colour_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+#   theme(legend.position = "top") 
+# 
+# Proteome_subset %>% ggplot(aes(x=LAG3, y = PD.1, color = SegmentLabelNew, fill = SegmentLabelNew)) +
+#   geom_point()+
+#   sm_statCorr( corr_method = 'spearman')+
+#   scale_fill_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+#   scale_colour_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+#   theme(legend.position = "top")
+```
+
+
+```{r, fig.height=3, fig.width=2}
+my_comparisons <- list( c("PTC", "PTH"), c("PTC57", "PTH57"), c("PTC", "PTC57"), c("PTH", "PTH57") )
+
+Proteome_subset  %>% ggplot(aes(x=SegmentLabelNew, y=PD.1, fill = SegmentLabelNew))+
+  geom_boxplot(alpha=0.5, outlier.size = 0.3, outlier.colour = "red")+
+  geom_jitter(alpha=0.5, size = 0.3, width = 0.2)+
+  xlab("") +
+   stat_compare_means(method = "wilcox", comparisons = my_comparisons, size = 2.5) +
+  scale_fill_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+  scale_colour_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+  theme(text = element_text(size=10), legend.position = "", line = element_line(size = 0.5))
+
+Proteome_subset  %>% ggplot(aes(x=SegmentLabelNew, y=PD.L1, fill = SegmentLabelNew))+
+  geom_boxplot(alpha=0.5, outlier.size = 0.3, outlier.colour = "red")+
+  geom_jitter(alpha=0.5, size = 0.3, width = 0.2)+
+  xlab("") +
+   stat_compare_means(method = "wilcox", comparisons = my_comparisons, size = 2.5) +
+  scale_fill_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+  scale_colour_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+  theme(text = element_text(size=10), legend.position = "", line = element_line(size = 0.5))
+
+Proteome_subset  %>% ggplot(aes(x=SegmentLabelNew, y=PD.L2, fill = SegmentLabelNew))+
+  geom_boxplot(alpha=0.5, outlier.size = 0.3, outlier.colour = "red")+
+  geom_jitter(alpha=0.5, size = 0.3, width = 0.2)+
+  xlab("") +
+   stat_compare_means(method = "wilcox", comparisons = my_comparisons, size = 2.5) +
+  scale_fill_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+  scale_colour_manual(values =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"))+
+  theme(text = element_text(size=10), legend.position = "", line = element_line(size = 0.5))
+```
+
+
+<!-- ```{r} -->
+<!-- CompiledIA %>%inner_join(Proteome_subset %>% filter(SegmentLabelNew=="PTH57" | SegmentLabelNew=="PTC57"), by = "CoreID") %>% distinct() %>% ggplot(aes(x=`T57+ freq`, y = PD.L1, colour = SegmentLabelNew, fill =SegmentLabelNew)) + -->
+<!--   geom_point()+ -->
+<!--   sm_corr_theme() + -->
+<!--   sm_statCorr( corr_method = 'spearman')+ -->
+<!--   theme(legend.position = "top") -->
+
+<!-- CompiledIA %>% select(CoreID, `T-H,57+ freq`) %>%inner_join(Proteome_subset %>% filter(SegmentLabelNew=="PTH57") %>% group_by(CoreID)%>% summarise_if(is.numeric, mean, na.rm = TRUE) , by = "CoreID") %>% distinct() %>% ggplot(aes(x=`T-H,57+ freq`, y = PD.L1)) + -->
+<!--   geom_point()+ -->
+<!--   sm_corr_theme() + -->
+<!--   sm_statCorr( corr_method = 'pearson')+ -->
+<!--   theme(legend.position = "top") -->
+
+<!-- CompiledIA %>% select(CoreID, `T-C,57+ freq`) %>%inner_join(Proteome_subset %>% filter(SegmentLabelNew=="PTC57") %>% group_by(CoreID)%>% summarise_if(is.numeric, mean, na.rm = TRUE) , by = "CoreID") %>% distinct() %>% ggplot(aes(x=`T-C,57+ freq`, y = PD.L1)) + -->
+<!--   geom_point()+ -->
+<!--   sm_corr_theme() + -->
+<!--   sm_statCorr( corr_method = 'pearson')+ -->
+<!--   theme(legend.position = "top") -->
+
+
+<!-- ``` -->
+
+## Early Helper vs Early Cytotoxic
+
+```{r dev = "png"}
+Proteome_subset<-  Proteome %>% filter(Within.the.tumor=="Tumor-rich") %>% filter(SegmentLabel !="Late Cytotoxic" & SegmentLabel !="Late Helper") 
+np <- 62 #NF1 removed
+e <- ncol(Proteome_subset)
+s <- e-np+1
+annot_file <- c("SegmentLabel")
+
+cols = c("Enriched in Early Cytotoxic" = "deeppink1", "Enriched in Early Helper" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+
+Final <- volcano_plots_binary(data=Proteome_subset, subset=TRUE, ROI_type = "Tumor-rich", formula = "~ SegmentLabel+(1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Early Helper", contrastlevel = "Early Cytotoxic", subset_cat = "Within.the.tumor", binary_group = "SegmentLabel", name = "ECvsEH" , ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/EH_vs_EC.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, SegmentLabelNew, c(s:e)) %>% group_by(PATID, SegmentLabelNew) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$SegmentLabelNew=as.factor(New$SegmentLabelNew)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTable.ECvsEH <-   DR_proteins_for_ECvsEH %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTable.ECvsEH, "Final Images used for publication/DR_proteins_for_ECvsEH.xlsx")
+```
+
+### CONCLUSION 
+CD4, CTLA4, FOXP3 higher in helper
+CD8, GZMA, X4.1BB, GZMB higher in cytotoxic. In line with what we know. 
+
+
+## Early Helper vs Late Helper
+
+```{r dev = "png"}
+Proteome_subset <-  Proteome %>% filter(Within.the.tumor=="Tumor-rich") %>% filter(SegmentLabel !="Early Cytotoxic" & SegmentLabel !="Late Cytotoxic") 
+cols = c("Enriched in Late Helper" = "deeppink1", "Enriched in Early Helper" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+
+
+Final <- volcano_plots_binary(data=Proteome_subset, subset=TRUE, ROI_type = "Tumor-rich", formula = "~ SegmentLabel + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Late Helper", contrastlevel = "Early Helper", subset_cat = "Within.the.tumor", binary_group = "SegmentLabel", name = "EHvsLH" , ctrl_biom=TRUE)
+
+
+pdf("Final Images used for publication/EH_vs_LH.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, SegmentLabelNew, c(s:e)) %>% group_by(PATID, SegmentLabelNew) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$SegmentLabelNew=as.factor(New$SegmentLabelNew)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTable.EHvsLH <-   DR_proteins_for_EHvsLH %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTable.EHvsLH, "Final Images used for publication/DR_proteins_for_EHvsLH.xlsx")
+```
+
+### CONCLUSION 
+GZMA, X4.1BB, GITR, PDL2, PDL1 higher in Late helper. 
+FOXP3, Arg1, MAPK higher in Early helper.
+
+## Early Cytotoxic vs Late Cytotoxic
+
+```{r dev = "png"}
+Proteome_subset <-  Proteome%>% filter(Within.the.tumor=="Tumor-rich") %>% filter(SegmentLabel !="Early Helper" & SegmentLabel !="Late Helper")
+cols = c("Enriched in Late Cytotoxic" = "deeppink1", "Enriched in Early Cytotoxic" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+
+Final <- volcano_plots_binary(data=Proteome_subset, subset=TRUE, ROI_type = "Tumor-rich", formula = "~ SegmentLabel + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Late Cytotoxic", contrastlevel = "Early Cytotoxic", subset_cat = "Within.the.tumor", binary_group = "SegmentLabel", name = "ECvsLC" , ctrl_biom=TRUE)
+
+
+pdf("Final Images used for publication/ECvsLC.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, SegmentLabelNew, c(s:e)) %>% group_by(PATID, SegmentLabelNew) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$SegmentLabelNew=as.factor(New$SegmentLabelNew)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTable.ECvsLC <-   DR_proteins_for_ECvsLC %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTable.ECvsLC, "Final Images used for publication/DR_proteins_for_ECvsLC.xlsx")
+```
+
+### CONCLUSION
+GITR and MAPK higher in early cytotoxic. 
+X4.1BB, PDL1, ICOS, LAG3, OX40L higher in late cytotoxic
+
+
+## Late Helper vs Late Cytotoxic
+
+```{r dev = "png"}
+Proteome_subset <-  Proteome %>% filter(Within.the.tumor=="Tumor-rich") %>% filter(SegmentLabel !="Early Helper" & SegmentLabel !="Early Cytotoxic")
+cols = c("Enriched in Late Cytotoxic" = "deeppink1", "Enriched in Late Helper" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+
+Final <-volcano_plots_binary(data=Proteome_subset, subset=TRUE, ROI_type = "Tumor-rich", formula = "~ SegmentLabel + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Late Cytotoxic", contrastlevel = "Late Helper", subset_cat = "Within.the.tumor", binary_group = "SegmentLabel", name = "LCvsLH" , ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/LCvsLH.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, SegmentLabelNew, c(s:e)) %>% group_by(PATID, SegmentLabelNew) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$SegmentLabelNew=as.factor(New$SegmentLabelNew)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTable.LCvsLH <-   DR_proteins_for_LCvsLH %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTable.LCvsLH, "Final Images used for publication/DR_proteins_for_LCvsLH.xlsx")
+```
+
+### Compilation
+
+```{r}
+CombinedTable.ECvsEH <- CombinedTable.ECvsEH %>% rename_all(~paste0(., ".ECvsEH")) %>% rename(biomarker = 1)
+CombinedTable.ECvsLC <- CombinedTable.ECvsLC %>% rename_all(~paste0(., ".ECvsLC")) %>% rename(biomarker = 1)
+CombinedTable.EHvsLH <- CombinedTable.EHvsLH %>% rename_all(~paste0(., ".EHvsLH")) %>% rename(biomarker = 1)
+CombinedTable.LCvsLH <- CombinedTable.LCvsLH %>% rename_all(~paste0(., ".LCvsLH")) %>% rename(biomarker = 1)
+conflicts_prefer(purrr::reduce)
+CombinedTable <- reduce(list(CombinedTable.ECvsEH, CombinedTable.ECvsLC, CombinedTable.EHvsLH, CombinedTable.LCvsLH), full_join)
+
+write_xlsx(CombinedTable, "Final Images used for publication/DR_proteins_for comparing the infiltrating four Tcells LMM.xlsx")
+```
+
+
+
+### CONCLUSION
+CD8 and CD4 in the right order. 
+GITR and CTLA4 higher in late helper. 
+GZMA, LAG3, OX40L and X4.1BB higher in late cytotoxic
+
+### Compilation of LMM result
+
+```{r, echo=FALSE, fig.width=8, fig.height=6}
+ECvsEH <- DR_proteins_for_ECvsEH %>% filter(DE=="DE")
+ECvsLC <- DR_proteins_for_ECvsLC%>% filter(DE=="DE")
+EHvsLH <- DR_proteins_for_EHvsLH%>% filter(DE=="DE")
+LCvsLH <- DR_proteins_for_LCvsLH%>% filter(DE=="DE")
+
+hmdf <- full_join(ECvsEH, EHvsLH, by = "biomarker") %>% 
+  rename(c("ECvsEH"="threshold.x", "EHvsLH"="threshold.y")) %>% 
+  full_join(ECvsLC, by="biomarker") %>% 
+  rename(c("ECvsLC"="threshold"))%>% 
+  full_join(LCvsLH, by="biomarker") %>% 
+  rename(c("LCvsLH"="threshold")) 
+
+hmdf <-hmdf %>% dplyr::select(biomarker, ECvsEH, ECvsLC,EHvsLH,  LCvsLH) %>% 
+  melt(id.vars="biomarker") 
+
+hmdf %>% ggplot(aes(x=biomarker, y=variable, fill=value))+
+  geom_tile() +
+  #scale_color_manual(na.value = "white", values = c( "#74a9cf",  "#feb24c","#88419d", "#ef3b2c"))+
+   scale_fill_manual(na.value = "white",values = c( "#feb24c","#88419d",  "#ef3b2c", "#74a9cf"))+
+ labs(x = "", y = "", fill = "T-cell Type") +
+   theme(axis.text.x = element_text(size = 6, angle = 90), axis.ticks.length.x = unit(0.0, "cm"),axis.ticks.x = element_line(size = 0.1),axis.title.y = element_text(size = 3),panel.background = element_rect(fill = "white"),panel.border = element_rect(fill = NA), legend.position = "top", legend.title = element_blank(), legend.text = element_text(size = 7)) 
+```
+
+
+# MAIN ANALYSIS 2 - additional analysis of T cell proteome
+
+##  Multivariate anova
+
+```{r}
+Proteome_subset <-  Proteome %>% filter(Within.the.tumor=="Tumor-rich") %>% group_by(PATID,SegmentLabelNew) %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% select(-Surface_area)
+
+# List of omics features
+omics_features <- names(Proteome_subset[,3:ncol(Proteome_subset)])
+
+#omics_features <- c("CD4", "CD8")
+anovapvalue <- data.frame()
+final_tukey_result <- data.frame()
+
+# Iterate through each omics feature
+for (feature in omics_features) {
+  # Perform one-way ANOVA to obtain the F-statistic and p-value
+  model <- lm(get(feature) ~ SegmentLabelNew, data = Proteome_subset)
+  anova_result <- aov(model)
+  anova_summary <- summary(anova_result)
+  
+  p_value <- anova_summary[[1]]$"Pr(>F)"[1]
+  
+  if (p_value <= 0.05) {
+  anovapvalue <- anovapvalue %>% rbind(cbind(feature=feature, p_value=p_value))
+  
+  # Perform the Tukey HSD test
+  tukey_result <- TukeyHSD(anova_result)
+
+  featureresult <- tukey_result$SegmentLabelNew %>% as.data.frame() %>% select(diff, `p adj`) %>% mutate(feature = paste(feature), direction_of_change = ifelse(diff > 0 , "Increase", "Decrease"), direction_of_change = ifelse(`p adj` <= 0.05 , direction_of_change, NA), ) %>% rownames_to_column("comparisons") 
+  
+  
+  
+  final_tukey_result <- final_tukey_result %>% rbind(featureresult) 
+  
+  }
+}
+anovapvalue
+final_tukey_result <- final_tukey_result %>% filter(`p adj`<=0.05)
+
+```
+
+### Plotting multivariate anova with direcrtion of change
+
+```{r, fig.width=4, fig.height=3}
+final_tukey_result_update <- final_tukey_result %>% select(feature, comparisons, direction_of_change) %>% pivot_wider(names_from = comparisons, values_from = direction_of_change) %>% dplyr::select(-c("PTH-PTC57", "PTH57-PTC")) 
+final_tukey_result_update <- final_tukey_result_update[rowSums( is.na(final_tukey_result_update) ) != 4, ] %>% arrange(feature)
+
+Heatmap(as.matrix(final_tukey_result_update %>% column_to_rownames("feature") %>% filter(rowSums(is.na(.)) != ncol(.))), col = c("Increase" ="seagreen","Decrease" ="deeppink3"), cluster_rows = FALSE, cluster_columns  = FALSE, na_col = "white", show_row_names = TRUE, border = TRUE,  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 4), heatmap_legend_param = list(
+    title = "Direction of change"
+  ), column_names_gp = gpar(rot = 0, fontsize = 6))
+
+
+finallist <- final_tukey_result_update %>% select("feature")
+
+final_tukey_result_update <- final_tukey_result %>% select(feature, comparisons, diff)  %>% select(feature, comparisons, diff) %>% pivot_wider(names_from = comparisons, values_from = diff)%>% dplyr::select(-c("PTH-PTC57", "PTH57-PTC")) 
+final_tukey_result_update <- final_tukey_result_update[rowSums( is.na(final_tukey_result_update) ) != 4, ] %>% arrange(feature)
+```
+
+### Plotting multivariate anova with difference 
+
+```{r, fig.width=4, fig.height=3}
+# Heatmap(as.matrix(final_tukey_result_update %>% filter(feature!="CD8")%>% column_to_rownames("feature") %>% filter(rowSums(is.na(.)) != ncol(.))),  cluster_rows = FALSE, cluster_columns  = FALSE, na_col = "white", show_row_names = TRUE, border = TRUE,  row_names_side = "left",
+#   row_names_gp = gpar(fontsize = 4), heatmap_legend_param = list(
+#     title = ""
+#   ), column_names_gp = gpar(rot = 0, fontsize = 6))
+
+
+# Heatmap(as.matrix(final_tukey_result_update  %>% column_to_rownames("feature") %>% filter(rowSums(is.na(.)) != ncol(.))),  cluster_rows = FALSE, col = coolwarm(40), cluster_columns  = FALSE, na_col = "white", show_row_names = TRUE, border = TRUE, row_names_side = "left",
+#   row_names_gp = gpar(fontsize = 4), heatmap_legend_param = list(
+#     title = ""
+#   ), column_names_gp = gpar(rot = 0, fontsize = 6))
+cubebasis <- pal.compress(cubehelix)
+Heatmap(as.matrix(final_tukey_result_update  %>% column_to_rownames("feature") %>% filter(rowSums(is.na(.)) != ncol(.))),  cluster_rows = FALSE, col = colorRampPalette(cubebasis)(40), cluster_columns  = FALSE, na_col = "white", show_row_names = TRUE, border = TRUE,  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 4), heatmap_legend_param = list(
+    title = ""
+  ), column_names_gp = gpar(rot = 0, fontsize = 6))
+```
+
+
+```{r, fig.width=3, fig.height=3}
+cols3 <- brewer.pal(n = 11, name = "RdBu")
+pal2 <- colorRampPalette(cols3)
+
+final_tukey_result_update <- final_tukey_result %>% select(feature, comparisons, diff)  %>% select(feature, comparisons, diff) %>% pivot_wider(names_from = comparisons, values_from = diff)%>% dplyr::select(feature, "PTH57-PTH", "PTC57-PTC")
+final_tukey_result_update <- final_tukey_result_update[rowSums( is.na(final_tukey_result_update) ) != 4, ] %>% arrange(feature)
+
+cubebasis <- pal.compress(cubehelix)
+Heatmap(as.matrix(final_tukey_result_update  %>% column_to_rownames("feature") %>% filter(rowSums(is.na(.)) != ncol(.))),  cluster_rows = FALSE, cluster_columns  = FALSE, na_col = "white", show_row_names = TRUE, border = TRUE,  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 6), heatmap_legend_param = list(
+    title = ""
+  ), column_names_gp = gpar(rot = 0, fontsize = 6), col = cols3)
+
+final_tukey_result_update <- final_tukey_result %>% select(feature, comparisons, diff)  %>% select(feature, comparisons, diff) %>% pivot_wider(names_from = comparisons, values_from = diff)%>% dplyr::select(c(feature, "PTH-PTC", "PTH57-PTC57")) 
+final_tukey_result_update <- final_tukey_result_update[rowSums( is.na(final_tukey_result_update) ) != 4, ] %>% arrange(feature)
+
+cubebasis <- pal.compress(cubehelix)
+Heatmap(as.matrix(final_tukey_result_update  %>% column_to_rownames("feature") %>% filter(rowSums(is.na(.)) != ncol(.))),  cluster_rows = FALSE, cluster_columns  = FALSE, na_col = "white", show_row_names = TRUE, border = TRUE,  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 6), heatmap_legend_param = list(
+    title = ""
+  ), column_names_gp = gpar(rot = 0, fontsize = 6), col = cols3)
+```
+
+## Comparing Anova probelist to output LMM
+
+```{r}
+Checklist <- full_join(finallist ,hmdf %>% select(biomarker) %>% distinct(), by = c("feature"="biomarker"))
+ 
+Checklist <- Checklist %>% left_join(finallist %>% mutate(appear.anova = 1), by = "feature")  %>% left_join(hmdf %>% select(biomarker) %>% distinct() %>% mutate(appear.lmm = 1),  by = c("feature"="biomarker")) %>% as.data.frame()
+
+Heatmap(as.matrix(t(Checklist) %>% row_to_names(1)), cluster_rows = FALSE, cluster_columns  = FALSE, na_col = "white", show_row_names = TRUE, border = TRUE,column_names_gp = gpar(rot = 0, fontsize = 6))
+```
+
+## PCA biplot using anova probelist
+
+```{r}
+library(FactoMineR)
+library(factoextra)
+
+subset_data <- Proteome_subset %>% select(SegmentLabelNew, matches(finallist$feature))
+# Perform PCA
+pca_result <- prcomp(subset_data[, -c(1,2)], scale = TRUE)
+
+# Create a dataframe with the PCA results and group variable
+pca_data <- data.frame(pca_result$x, Group = subset_data$SegmentLabelNew)
+
+# Plot PCA biplot with color-coded groups
+fviz_pca_ind(
+  pca_result,
+  label = "var",
+  habillage=subset_data$SegmentLabelNew,
+  geom.ind = "point",
+  addEllipses = TRUE,
+  col.var = "contrib",
+  palette = "Set1",
+  title = "PCA Biplot"
+)
+
+fviz_pca_biplot(
+  pca_result,
+  label = "var",
+  habillage=subset_data$SegmentLabelNew,
+   geom.ind = "point",
+  addEllipses = TRUE,
+  palette =  c( "#feb24c","#ef3b2c","#88419d", "#74a9cf"),
+  title = "PCA Biplot", col.var = "black", 
+  
+)
+screeplot(pca_result)
+```
+
+<!-- ## Plotly PCA  -->
+
+<!-- ```{r} -->
+<!-- library(plotly) -->
+<!-- library(stats) -->
+
+<!-- prin_comp <- prcomp(subset_data[, -c(1,2)], scale = TRUE) -->
+<!-- explained_variance_ratio <- summary(prin_comp)[["importance"]]['Proportion of Variance',] -->
+<!-- explained_variance_ratio <- 100 * explained_variance_ratio -->
+<!-- components <- prin_comp[["x"]] -->
+<!-- components <- data.frame(components) -->
+<!-- components <- cbind(components, subset_data$SegmentLabelNew) -->
+<!-- components$PC3 <- -components$PC3 -->
+<!-- components$PC2 <- -components$PC2 -->
+
+<!-- axis = list(showline=FALSE, -->
+<!--             zeroline=FALSE, -->
+<!--             gridcolor='#ffff', -->
+<!--             ticklen=4, -->
+<!--             titlefont=list(size=13)) -->
+<!-- conflicts_prefer(plotly::layout) -->
+<!-- fig <- components %>% -->
+<!--   plot_ly()  %>% -->
+<!--   add_trace( -->
+<!--     type = 'splom', -->
+<!--     dimensions = list( -->
+<!--       list(label=paste('PC 1 (',toString(round(explained_variance_ratio[1],1)),'%)',sep = ''), values=~PC1), -->
+<!--       list(label=paste('PC 2 (',toString(round(explained_variance_ratio[2],1)),'%)',sep = ''), values=~PC2), -->
+<!--       list(label=paste('PC 3 (',toString(round(explained_variance_ratio[3],1)),'%)',sep = ''), values=~PC3), -->
+<!--       list(label=paste('PC 4 (',toString(round(explained_variance_ratio[4],1)),'%)',sep = ''), values=~PC4) -->
+<!--     ), -->
+<!--     color = ~subset_data$SegmentLabelNew, colors = c('#636EFA','#EF553B','#00CC96',"#feb24c") -->
+<!--   ) %>% -->
+<!--   style(diagonal = list(visible = FALSE)) %>% -->
+<!--   layout( -->
+<!--     legend=list(title=list(text='color')), -->
+<!--     hovermode='closest', -->
+<!--     dragmode= 'select', -->
+<!--     plot_bgcolor='rgba(240,240,240, 0.95)', -->
+<!--     xaxis=list(domain=NULL, showline=F, zeroline=F, gridcolor='#ffff', ticklen=4), -->
+<!--     yaxis=list(domain=NULL, showline=F, zeroline=F, gridcolor='#ffff', ticklen=4), -->
+<!--     xaxis2=axis, -->
+<!--     xaxis3=axis, -->
+<!--     xaxis4=axis, -->
+<!--     yaxis2=axis, -->
+<!--     yaxis3=axis, -->
+<!--     yaxis4=axis -->
+<!--   ) -->
+
+<!-- fig -->
+
+
+<!-- components <- prin_comp[["x"]] -->
+<!-- components <- data.frame(components) -->
+<!-- components$PC2 <- -components$PC2 -->
+<!-- components$PC3 <- -components$PC3 -->
+<!-- components = cbind(components, subset_data$SegmentLabelNew) -->
+
+<!-- tot_explained_variance_ratio <- summary(prin_comp)[["importance"]]['Proportion of Variance',] -->
+<!-- tot_explained_variance_ratio <- 100 * sum(tot_explained_variance_ratio) -->
+
+<!-- tit = 'Total Explained Variance = 99.48' -->
+
+<!-- fig <- plot_ly(components, x = ~PC1, y = ~PC2, z = ~PC3, color = ~subset_data$SegmentLabelNew, colors = c('#636EFA','#EF553B','#00CC96') ) %>% -->
+<!--   add_markers(size = 1) -->
+
+
+<!-- fig <- fig %>% -->
+<!--   layout( -->
+<!--     title = tit, -->
+<!--     scene = list(bgcolor = "#e5ecf6") -->
+<!-- ) -->
+
+<!-- fig -->
+<!-- <!-- ``` --> -->
+
+<!-- ## PLSDA to differentiate between the cell types using the anova list -->
+
+<!-- ```{r} -->
+<!-- library(mixOmics) -->
+<!-- conflicts_prefer(mixOmics::splsda) -->
+
+<!-- X <- subset_data[,-c(1,2)] # use the  expression data as the X matrix -->
+<!-- Y <- subset_data$SegmentLabelNew %>% as.factor()# use the class data as the Y matrix -->
+
+<!-- dim(X) # c -->
+
+<!-- summary(Y) -->
+
+<!-- pca.srbct = pca(X, ncomp = 10, center = TRUE, scale = TRUE)  -->
+<!-- plot(pca.srbct) -->
+
+<!-- plotIndiv(pca.srbct, group = subset_data$SegmentLabelNew %>% as.factor(), ind.names = FALSE, # plot the samples projected -->
+<!--           legend = TRUE, title = 'PCA, comp 1 - 2') # onto the PCA subspace -->
+
+<!-- srbct.splsda <- splsda(X, Y, ncomp = 10)  # set ncomp to 10 for performance assessment later -->
+
+<!-- plotIndiv(srbct.splsda , comp = 1:2,  -->
+<!--           group = subset_data$SegmentLabelNew %>% as.factor(), ind.names = FALSE,  # colour points by class -->
+<!--           ellipse = TRUE, # include 95% confidence ellipse for each class -->
+<!--           legend = TRUE, title = '(a) PLSDA with confidence ellipses') -->
+
+<!-- # use the max.dist measure to form decision boundaries between classes based on PLS-DA data -->
+<!-- background = background.predict(srbct.splsda, comp.predicted=2, dist = "max.dist") -->
+
+<!-- # plot the samples projected onto the first two components of the PLS-DA subspace -->
+<!-- plotIndiv(srbct.splsda, comp = 1:2, -->
+<!--           group = subset_data$SegmentLabelNew %>% as.factor(), ind.names = FALSE, # colour points by class -->
+<!--           background = background, # include prediction background for each class -->
+<!--           legend = TRUE, title = " (b) PLSDA with prediction background") -->
+<!-- ``` -->
+<!-- ```{r} -->
+<!-- perf.splsda.srbct <- perf(srbct.splsda, validation = "Mfold",  -->
+<!--                           folds = 5, nrepeat = 10, # use repeated cross-validation -->
+<!--                           progressBar = FALSE, auc = TRUE) # include AUC values -->
+
+<!-- # plot the outcome of performance evaluation across all ten components -->
+<!-- plot(perf.splsda.srbct, col = color.mixo(5:7), sd = TRUE, -->
+<!--      legend.position = "horizontal") -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- perf.splsda.srbct$choice.ncomp  -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- list.keepX <- c(1:10,  seq(20, 300, 10)) -->
+
+<!-- # undergo the tuning process to determine the optimal number of variables -->
+<!-- tune.splsda.srbct <- tune.splsda(X, Y, ncomp = 8, # calculate for first 4 components -->
+<!--                                  validation = 'Mfold', -->
+<!--                                  folds = 5, nrepeat = 10, # use repeated cross-validation -->
+<!--                                  dist = 'max.dist', # use max.dist measure -->
+<!--                                  measure = "BER", # use balanced error rate of dist measure -->
+<!--                                  test.keepX = list.keepX, -->
+<!--                                  cpus = 2) # allow for paralleliation to decrease runtime -->
+
+<!-- plot(tune.splsda.srbct, col = color.jet(8)) # plot output of variable number tuning -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- tune.splsda.srbct$choice.ncomp$ncomp # what is the optimal value of components according to tune.splsda() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- tune.splsda.srbct$choice.keepX # what are the optimal values of variables according to tune.splsda() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- optimal.ncomp <- tune.splsda.srbct$choice.ncomp$ncomp -->
+<!-- optimal.keepX <- tune.splsda.srbct$choice.keepX[1:optimal.ncomp] -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- final.splsda <- splsda(X, Y,  -->
+<!--                        ncomp = optimal.ncomp,  -->
+<!--                        keepX = optimal.keepX) -->
+
+<!-- plotIndiv(final.splsda, comp = c(1,2), # plot samples from final model -->
+<!--           group = subset_data$SegmentLabelNew %>% as.factor(), ind.names = FALSE, # colour by class label -->
+<!--           ellipse = TRUE, legend = TRUE, # include 95% confidence ellipse -->
+<!--           title = ' (a) sPLS-DA, comp 1 & 2') -->
+
+<!-- plotIndiv(final.splsda, comp = c(1,3), # plot samples from final model -->
+<!--           group = subset_data$SegmentLabelNew %>% as.factor(), ind.names = FALSE,  # colour by class label -->
+<!--           ellipse = TRUE, legend = TRUE, # include 95% confidence ellipse -->
+<!--           title = '(b) sPLS-DA, comp 1 & 3') -->
+
+<!-- plotIndiv(final.splsda, comp = c(1,4), # plot samples from final model -->
+<!--           group = subset_data$SegmentLabelNew %>% as.factor(), ind.names = FALSE,  # colour by class label -->
+<!--           ellipse = TRUE, legend = TRUE, # include 95% confidence ellipse -->
+<!--           title = '(b) sPLS-DA, comp 1 & 4') -->
+
+<!-- legend=list(legend = levels(Y), # set of classes -->
+<!--             col = unique(color.mixo(Y)), # set of colours -->
+<!--             title = "Tumour Type", # legend title -->
+<!--             cex = 0.7) # legend size -->
+
+<!-- # generate the CIM, using the legend and colouring rows by each sample's class -->
+
+<!-- tiff("test.tiff") -->
+<!-- cim <- cim(final.splsda, row.sideColors = color.mixo(Y),  -->
+<!--            legend = legend) -->
+<!-- dev.off() -->
+
+<!-- perf.splsda.srbct <- perf(final.splsda,  -->
+<!--                           folds = 5, nrepeat = 10, # use repeated cross-validation -->
+<!--                           validation = "Mfold", dist = "max.dist",  # use max.dist measure -->
+<!--                           progressBar = FALSE) -->
+
+<!-- # plot the stability of each feature for the first three components, 'h' type refers to histogram -->
+<!-- par(mfrow=c(1,3)) -->
+<!-- plot(perf.splsda.srbct$features$stable[[1]], type = 'h',  -->
+<!--      ylab = 'Stability',  -->
+<!--      xlab = 'Features',  -->
+<!--      main = '(a) Comp 1', las =2) -->
+<!-- plot(perf.splsda.srbct$features$stable[[2]], type = 'h',  -->
+<!--      ylab = 'Stability',  -->
+<!--      xlab = 'Features',  -->
+<!--      main = '(b) Comp 2', las =2) -->
+<!-- plot(perf.splsda.srbct$features$stable[[3]], type = 'h',  -->
+<!--      ylab = 'Stability',  -->
+<!--      xlab = 'Features', -->
+<!--      main = '(c) Comp 3', las =2) -->
+
+
+<!-- plotVar(final.splsda, comp = c(1,2), cex = 3) # generate correlation circle plot -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- legend=list(legend = levels(Y), # set of classes -->
+<!--             col = unique(color.mixo(Y)), # set of colours -->
+<!--             title = "Cell Type", # legend title -->
+<!--             cex = 0.7) # legend size -->
+
+<!-- # generate the CIM, using the legend and colouring rows by each sample's class -->
+<!-- #pdf("cimplot.pdf") -->
+<!-- cim(final.splsda, row.sideColors = color.mixo(Y),  -->
+<!--            legend = legend,  margins = c(2, 2),  scale = T) -->
+<!-- #dev.off() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- select.name <- selectVar(final.splsda, comp = 1)$name -->
+<!-- # Then extract the stability values from perf: -->
+<!-- stability <- perf.splsda.srbct$features$stable$comp1[select.name] -->
+<!-- # Just the head of the stability of the selected var: -->
+<!-- comp1list <- cbind(selectVar(final.splsda, comp = 1)$value, stability) -->
+<!-- comp1list -->
+
+<!-- select.name <- selectVar(final.splsda, comp = 2)$name -->
+<!-- # Then extract the stability values from perf: -->
+<!-- stability <- perf.splsda.srbct$features$stable$comp2[select.name] -->
+<!-- # Just the head of the stability of the selected var: -->
+<!-- comp2list <- cbind(selectVar(final.splsda, comp = 2)$value, stability) -->
+<!-- comp2list -->
+
+<!-- select.name <- selectVar(final.splsda, comp = 3)$name -->
+<!-- # Then extract the stability values from perf: -->
+<!-- stability <- perf.splsda.srbct$features$stable$comp3[select.name] -->
+<!-- # Just the head of the stability of the selected var: -->
+<!-- comp3list <- cbind(selectVar(final.splsda, comp = 3)$value, stability) -->
+<!-- comp3list -->
+
+<!-- select.name <- selectVar(final.splsda, comp = 4)$name -->
+<!-- # Then extract the stability values from perf: -->
+<!-- stability <- perf.splsda.srbct$features$stable$comp4[select.name] -->
+<!-- # Just the head of the stability of the selected var: -->
+<!-- comp4list <- cbind(selectVar(final.splsda, comp = 4)$value, stability) -->
+<!-- comp4list -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- finalist <- rbind(comp1list,comp2list,comp3list, comp4list) %>% filter(Freq==1) -->
+<!-- finalist -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- train <- sample(1:nrow(X), 50) # randomly select 50 samples in training -->
+<!-- test <- setdiff(1:nrow(X), train) # rest is part of the test set -->
+
+<!-- # store matrices into training and test set: -->
+<!-- X.train <- X[train, ] -->
+<!-- X.test <- X[test,] -->
+<!-- Y.train <- Y[train] -->
+<!-- Y.test <- Y[test] -->
+
+<!-- train.splsda.srbct <- splsda(X.train, Y.train, ncomp = optimal.ncomp, keepX = optimal.keepX) -->
+<!-- predict.splsda.srbct <- predict(train.splsda.srbct, X.test,  -->
+<!--                                 dist = "mahalanobis.dist") -->
+
+<!-- predict.comp2 <- predict.splsda.srbct$class$mahalanobis.dist[,2] -->
+<!-- table(factor(predict.comp2, levels = levels(Y)), Y.test) -->
+
+<!-- predict.comp3 <- predict.splsda.srbct$class$mahalanobis.dist[,3] -->
+
+
+<!-- table(factor(predict.comp3, levels = levels(Y)), Y.test) -->
+
+<!-- auc.splsda = auroc(final.splsda, roc.comp = 1, print = FALSE) # AUROC for the first component -->
+
+<!-- auc.splsda = auroc(final.splsda, roc.comp = 4, print = FALSE) # AUROC for all three components -->
+<!-- ``` -->
+
+
+## Heatmap with anova list 
+
+```{r}
+Proteome_subset2 <- Proteome_subset %>% select(PATID, SegmentLabelNew, matches(finallist$feature)) %>% as.data.frame()
+
+heatmapinput <- Proteome_subset2[,-c(1,2)] %>%  as.data.frame() %>% scale()
+
+cols3 <- brewer.pal(n = 11, name = "BrBG")
+pal2 <- colorRampPalette(cols3)
+
+ha <- HeatmapAnnotation(df = Proteome_subset2$SegmentLabelNew, show_legend=FALSE, annotation_height = unit(5, "mm"))
+plot2 <- Heatmap(as.matrix(t(heatmapinput)), row_names_gp = gpar(fontsize = 6), cluster_column_slices = TRUE, row_gap = unit(1, "mm"), border = TRUE, row_title_rot = 0, column_names_gp = gpar(fontsize = 0), column_split = Proteome_subset2$SegmentLabelNew, top_annotation = ha, show_heatmap_legend = FALSE, cluster_rows = T, col = cols3)
+draw(plot2, show_heatmap_legend = FALSE, show_annotation_legend = FALSE)
+
+# display.brewer.all(type="div")
+```
+
+## Boxplot of anova list 
+
+```{r}
+my_comparisons <- list( c("PTC", "PTH"), c("PTC57", "PTH57"), c("PTC", "PTC57"), c("PTH", "PTH57") )
+
+pdf("Boxplot top 10 proteins between T cell types wilcox larger.pdf")
+Proteome_subset2 %>% melt() %>% ggplot(aes(x=SegmentLabelNew, y=value, fill = SegmentLabelNew))+
+  facet_wrap(~variable, scales = "free")+
+  geom_boxplot(alpha=0.5, outlier.size = 0.3, outlier.colour = "red")+
+  geom_jitter(alpha=0.5, size = 0.3, width = 0.2)+
+  xlab("") +
+   stat_compare_means(method = "wilcox", comparisons = my_comparisons, label = "p.signif", size =1.5) +
+  theme_classic()+
+  theme(text = element_text(size=5), legend.position = "", line = element_line(size = 0.5))+
+  ylab("Value")
+dev.off()
+```
+
+<!-- ## Anova with PATID as a random effect -->
+
+<!-- ```{r} -->
+<!-- np <- 62 ## no of markers (-NF1) -->
+<!-- e <- ncol(Proteome) -->
+<!-- s <- e-np+1 -->
+<!-- PS <-  Proteome %>% filter(Within.the.tumor=="Tumor-rich") %>% select(PATID, SegmentLabelNew, all_of(s:e)) -->
+
+<!-- library(ez) -->
+<!-- library(kableExtra) -->
+
+<!-- # Group the data by patient_id, cell_type, and omics_feature, and calculate the mean for each combination -->
+<!-- # grouped_data <- PS %>% -->
+<!-- #   group_by(PATID, SegmentLabelNew, CD8) %>% -->
+<!-- #   summarize(mean_omics_feature = mean(CD8)) -->
+
+<!-- # Perform ANOVA analysis with patient as a random effect -->
+<!-- anova_results <- ezANOVA( -->
+<!--   data = PS, -->
+<!--   dv = CD8, -->
+<!--   wid = PATID, -->
+<!--   between  = SegmentLabelNew, -->
+<!--   type = 3,  -->
+<!--   detailed = TRUE,  -->
+<!--                 return_aov = TRUE -->
+<!-- ) -->
+
+<!-- # Print the ANOVA table -->
+<!-- print(anova_results) -->
+<!-- anova_results$ANOVA %>%  -->
+<!--   kable() -->
+<!-- ``` -->
+
+
+<!-- ## RANDOM FOREST  -->
+
+<!-- ```{r, echo=FALSE, fig.width=7, fig.height=7} -->
+<!-- library(dplyr) -->
+<!-- library(ggraph) -->
+<!-- library(igraph) -->
+
+<!-- tree_func <- function(final_model,  -->
+<!--                       tree_num) { -->
+
+<!--   # get tree by index -->
+<!--   tree <- randomForest::getTree(final_model,  -->
+<!--                                 k = tree_num,  -->
+<!--                                 labelVar = TRUE) %>% -->
+<!--     tibble::rownames_to_column() %>% -->
+<!--     # make leaf split points to NA, so the 0s won't get plotted -->
+<!--     mutate(`split point` = ifelse(is.na(prediction), `split point`, NA)) -->
+
+<!--   # prepare data frame for graph -->
+<!--   graph_frame <- data.frame(from = rep(tree$rowname, 2), -->
+<!--                             to = c(tree$`left daughter`, tree$`right daughter`)) -->
+
+<!--   # convert to graph and delete the last node that we don't want to plot -->
+<!--   graph <- graph_from_data_frame(graph_frame) %>% -->
+<!--     delete_vertices("0") -->
+
+<!--   # set node labels -->
+<!--   V(graph)$node_label <- gsub("_", " ", as.character(tree$`split var`)) -->
+<!--   V(graph)$leaf_label <- as.character(tree$prediction) -->
+<!--   V(graph)$split <- as.character(round(tree$`split point`, digits = 2)) -->
+
+<!--   # plot -->
+<!--   plot <- ggraph(graph, 'dendrogram') +  -->
+<!--     theme_bw() + -->
+<!--     geom_edge_link() + -->
+<!--     geom_node_point() + -->
+<!--     geom_node_text(aes(label = node_label), na.rm = TRUE, repel = TRUE) + -->
+<!--     geom_node_label(aes(label = split), vjust = 2.5, na.rm = TRUE, fill = "white") + -->
+<!--     geom_node_label(aes(label = leaf_label, fill = leaf_label), na.rm = TRUE,  -->
+<!--                     repel = TRUE, colour = "white", fontface = "bold", show.legend = FALSE) + -->
+<!--     theme(panel.grid.minor = element_blank(), -->
+<!--           panel.grid.major = element_blank(), -->
+<!--           panel.background = element_blank(), -->
+<!--           plot.background = element_rect(fill = "white"), -->
+<!--           panel.border = element_blank(), -->
+<!--           axis.line = element_blank(), -->
+<!--           axis.text.x = element_blank(), -->
+<!--           axis.text.y = element_blank(), -->
+<!--           axis.ticks = element_blank(), -->
+<!--           axis.title.x = element_blank(), -->
+<!--           axis.title.y = element_blank(), -->
+<!--           plot.title = element_text(size = 10)) -->
+
+<!--   print(plot) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- library(randomForest) -->
+<!-- set.seed(123) -->
+<!-- subset_data <- Proteome_subset %>% select(SegmentLabelNew, matches(finallist$feature)) -->
+
+<!-- # Extract the subgroup column and protein columns -->
+<!-- subgroups <- subset_data$SegmentLabelNew -->
+<!-- protein_data <- subset_data[, -c(1,2)] -->
+
+<!-- # Convert subgroup column to a factor -->
+<!-- subgroups <- as.factor(subgroups) -->
+
+<!-- # Train the Random Forest model -->
+<!-- rf_model <- randomForest(subgroups ~ ., data = protein_data, ntree=1000) -->
+
+<!-- # Extract variable importance measures -->
+<!-- importance <- importance(rf_model) -->
+
+<!-- # Sort variables by importance -->
+<!-- sorted_importance <- importance[order(importance, decreasing = TRUE), ] -->
+
+<!-- subselect <- sorted_importance %>% as.data.frame() %>% filter(.>=3) %>% nrow() -->
+<!-- # Print the variable importance measures -->
+<!-- plot(sorted_importance) -->
+
+<!-- k <- 10 # Change this value to select the desired number of top proteins -->
+<!-- top_proteins <- sorted_importance[1:subselect] %>% names() -->
+
+
+<!-- # Create a new dataframe with the selected proteins and subgroup information -->
+<!-- selected_data <- cbind(SegmentLabelNew=subset_data$SegmentLabelNew, protein_data[,top_proteins]) -->
+
+<!-- # Perform PCA on the selected proteins -->
+<!-- pca_result <- prcomp(selected_data[, -1], scale = TRUE) -->
+
+<!-- var_importance <- importance(rf_model) %>% as.data.frame() %>% arrange(desc(MeanDecreaseGini)) -->
+
+<!-- ggplot(var_importance, aes(x = reorder(rownames(var_importance), -MeanDecreaseGini), y = MeanDecreaseGini)) + -->
+<!--   geom_bar(stat = "identity", color="royalblue", fill="cyan3") + -->
+<!--   labs(x = "Protein", y = "Mean Decrease Gini") + -->
+<!--   theme(axis.text.x = element_text(angle = 45, hjust = 1, size=6)) -->
+<!-- ``` -->
+
+
+<!-- ```{r, fig.width=10, fig.height=10} -->
+<!-- varlist <- var_importance %>% rownames_to_column("feature") %>% head(10) -->
+
+<!-- subdata <-  selected_data %>% select(SegmentLabelNew, matches(varlist$feature)) -->
+
+<!-- rf_model <- randomForest(subgroups ~ ., data = subdata[,-1], ntree=1000) -->
+<!-- plottree <- getTree(rf_model, labelVar=TRUE) %>% mutate(`split point` = round(as.numeric(`split point`), 1)) -->
+<!-- reprtree:::plot.getTree(rf_model) -->
+
+<!-- pdf("Some Results images/RFModel for subset types.pdf") -->
+<!-- reprtree:::plot.getTree(rf_model) -->
+<!-- dev.off() -->
+<!-- ``` -->
+
+
+<!-- ```{r, fig.width=15, fig.height=10} -->
+<!-- library(ggraph) -->
+
+<!-- tree_func(final_model = rf_model, 1) -->
+
+<!-- tiff("Some Results images/RFModel for subset types.tiff", width = 1000, height = 500, units = "px") -->
+<!-- tree_func(final_model = rf_model, 1) -->
+<!-- dev.off() -->
+<!-- ``` -->
+
+# MAIN ANALYSIS3 - Comparison of the different infiltrating T-cell subtypes within tumor, Transcriptome (CTA)
+
+```{r dev = "png"}
+source("Function list CTA.R") 
+CTA_subset <-  CTA %>% filter(Within.the.tumor =="Tumor-rich")
+
+n <- 1482 
+s <- ncol(CTA)-n +1
+e <- ncol(CTA)
+annot_file <- c("SegmentLabelNew")
+
+CTA_subset[,s:e]
+```
+
+## MTC vs MTH - LMM 
+
+```{r dev = "png"}
+cols = c("Enriched in MTC" = "deeppink1", "Enriched in MTH" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+
+Final <-volcano_plots_binary_CTA(data=CTA_subset, subset=TRUE, ROI_type = "Tumor-rich", formula = "~ SegmentLabelNew + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "MTC", contrastlevel = "MTH", subset_cat = "Within.the.tumor", binary_group = "SegmentLabelNew", name = "MTHvsMTC" , ctrl_biom=TRUE, s = s, e = e, n = n)
+
+pdf("Final Images used for publication/MTHvsMTC.pdf")
+Final
+dev.off()
+
+New  <- CTA_subset %>% select(PATID, SegmentLabelNew, c(s:e)) %>% group_by(PATID, SegmentLabelNew) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$SegmentLabelNew=as.factor(New$SegmentLabelNew)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTableEH <-   DR_proteins_for_MTHvsMTC %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTableEH, "Final Images used for publication/DR_proteins_for_MTHvsMTC.xlsx")
+
+CTA_subset <-  CTA %>% filter(Within.the.tumor !="Tumor-rich") 
+
+CTA_subset %>% select(PATID) %>% distinct()
+
+```
+
+
+```{r dev = "png"}
+commonlist <- readxl::read_excel("Datafiles/probe targets - gene names.xlsx") %>% as.data.frame() %>% drop_na(CTAname) %>% select(ProteinName, CTAname) %>% distinct()
+
+CTA_subset <-  CTA %>% filter(Within.the.tumor =="Tumor-rich") %>% select(SegmentDisplayName,PATID, Within.the.tumor, SegmentLabelNew, any_of(commonlist$CTAname))
+
+n=62
+s <-5
+e <- ncol(CTA_subset)
+annot_file <- c("SegmentLabelNew")
+
+CTA_subset[,s:e]
+
+cols = c("Enriched in MTC" = "deeppink1", "Enriched in MTH" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+volcano_plots_binary_CTA(data=CTA_subset, subset=TRUE, ROI_type = "Tumor-rich", formula = "~ SegmentLabelNew + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "MTC", contrastlevel = "MTH", subset_cat = "Within.the.tumor", binary_group = "SegmentLabelNew", name = "MTHvsMTC_shortlist" , ctrl_biom=TRUE, s = s, e = e, n = n)
+```
+
+### CONCLUSION
+High in Helper T cells (MTH) - LEF1, TCF7, IL7R, CTLA4, CD4
+High in Cytotoxic T cells (MTC) - CD8A, CCL5, NKG7, GZMK, GZMA, CCL4, KLRK1, CD8B, EOMES, PRF1, GZMH, LAG3 etc. 
+
+## GSEA 
+
+### for the lmm output only 
+
+```{r, fig.height=8, fig.width=8}
+library(fgsea)
+library(ReactomePA)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+conflicts_prefer(ReactomePA::dotplot)
+conflicts_prefer(base::intersect)
+
+#gene_sets <- read.gmt("h.all.v7.4.symbols.gmt")
+CTA_subset <-  CTA %>% filter(Within.the.tumor =="Tumor-rich")
+ListCTA <- DR_proteins_for_MTHvsMTC %>% filter(DE=="DE")
+subMTC <- CTA_subset %>% filter(SegmentLabelNew=="MTC") %>% select( any_of(ListCTA$biomarker))  %>% as.data.frame()
+subMTH <- CTA_subset %>% filter(SegmentLabelNew=="MTH") %>% select( any_of(ListCTA$biomarker))  %>% as.data.frame()
+
+pvaluelist <- data.frame()
+for (i in ListCTA$biomarker) {
+  testt <- t.test(subMTC[,i], subMTH[,i])
+  pvaluelist <- rbind(pvaluelist, cbind(i, testt$p.value))
+}
+
+subMTC <- CTA_subset %>% filter(SegmentLabelNew=="MTC") %>% select( any_of(ListCTA$biomarker)) %>% t() %>% as.data.frame()
+subMTH <- CTA_subset %>% filter(SegmentLabelNew=="MTH") %>% select( any_of(ListCTA$biomarker)) %>% t() %>% as.data.frame()
+
+mean_expr_MTC <- apply(subMTC, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+mean_expr_MTH <- apply(subMTH, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+
+fold_change <- mean_expr_MTC / mean_expr_MTH 
+fold_change <- data.frame(Log2_Ratios = log2(fold_change)) %>% rownames_to_column("TargetName")
+genenames <- read_excel("Datafiles/geneIDs.xlsx") 
+
+
+fold_change$TargetName[fold_change$TargetName == "PLK1.y"] <- "PLK1"
+fold_change$TargetName[fold_change$TargetName == "KIR.Family"] <- "KIR Family"
+
+fold_change <- fold_change  %>% left_join(genenames %>% select(TargetName, GeneID), by = "TargetName") %>% left_join(pvaluelist, by = c("TargetName"="i"))  %>% as.data.frame() %>% mutate(logp  = log2(1/as.numeric(as.character(V2))))
+```
+
+#### Test Volcano plot
+
+```{r}
+ggplot(fold_change, aes(x = ., y = logp)) +
+  geom_point(aes(color = as.numeric(as.character(V2)) < 0.05), alpha = 0.7, size = 2.5) +
+  labs(title = "Volcano Plot", x = "log2 FC", y = "Log2(1/pval)") +
+  geom_hline(yintercept = 4.32, linetype = "dashed", color = "red") +
+  theme_minimal()
+```
+
+#### GO
+
+```{r, fig.height=8, fig.width=8}
+geneList = fold_change[,2]
+names(geneList) = as.character(fold_change[,3])
+geneList = sort(geneList, decreasing = TRUE)
+
+gsea_results <- gseGO(
+  geneList = geneList,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pvalueCutoff = 0.05
+  #nPerm = 10000
+)
+
+### NO results with GO
+
+# require(DOSE)
+# ReactomePA::dotplot(gsea_results, split=".sign") + facet_grid(.~.sign)
+```
+
+#### KEGG
+
+```{r, fig.height=8, fig.width=8}
+set.seed(42)
+kk2 <- gseKEGG(geneList     = geneList,
+              #nPerm        = 10000,
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "none",
+               keyType       = "ncbi-geneid")
+
+ReactomePA::dotplot(kk2, showCategory = 50, title = "Enriched Pathways" , split=".sign", font.size = 8) + facet_grid(.~.sign)
+```
+
+#### MSigDB
+
+##### C5
+
+```{r, fig.height=8, fig.width=8}
+t2g <- msigdbr(species = "Homo sapiens", category = "C5") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign") + facet_grid(.~.sign)
+```
+
+##### Hallmarks
+
+```{r, fig.height=8, fig.width=8}
+t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign", font.size = 8) + facet_grid(.~.sign)
+
+## dont run - C8, C2, C4, C1
+## C6 doesnt give anything
+```
+
+### for all list
+
+```{r,fig.height=4, fig.width=7}
+## List of probes 
+ListCTA <- DR_proteins_for_MTHvsMTC #%>% filter(DE=="DE")
+
+## creating subset dfs for the groups being compared
+subMTC <- CTA_subset %>% filter(SegmentLabelNew=="MTC") %>% select( any_of(ListCTA$biomarker)) %>% t() %>% as.data.frame()
+subMTH <- CTA_subset %>% filter(SegmentLabelNew=="MTH") %>% select( any_of(ListCTA$biomarker)) %>% t() %>% as.data.frame()
+
+mean_expr_MTC <- apply(subMTC, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+mean_expr_MTH <- apply(subMTH, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+
+fold_change <- mean_expr_MTC / mean_expr_MTH 
+fold_change <- data.frame(Log2_Ratios = log2(fold_change))%>% rownames_to_column("TargetName")
+genenames <- read_excel("Datafiles/geneIDs.xlsx") 
+
+fold_change$TargetName[fold_change$TargetName == "PLK1.y"] <- "PLK1"
+fold_change$TargetName[fold_change$TargetName == "KIR.Family"] <- "KIR Family"
+
+fold_change <- fold_change  %>% left_join(genenames %>% select(TargetName, GeneID), by = "TargetName")
+
+geneList = fold_change[,2]
+names(geneList) = as.character(fold_change[,3])
+geneList = sort(geneList, decreasing = TRUE)
+```
+
+#### GO 
+
+```{r,fig.height=4, fig.width=7}
+gsea_results <- gseGO(
+  geneList = geneList,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pvalueCutoff = 0.05
+  #nPerm = 10000
+)
+
+require(DOSE)
+ReactomePA::dotplot(gsea_results, split=".sign") + facet_grid(.~.sign)
+```
+
+#### KEGG
+
+```{r,fig.height=4, fig.width=7}
+set.seed(42)
+kk2 <- gseKEGG(geneList     = geneList,
+              #nPerm        = 10000,
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "none",
+               keyType       = "ncbi-geneid")
+
+ReactomePA::dotplot(kk2, showCategory = 50, title = "Enriched Pathways" , split=".sign", font.size = 8) + facet_grid(.~.sign)
+
+df <- data.frame(kk2) %>%  mutate(Sign = ifelse(NES <0, "Suppressed", "Activated"))
+
+listid <- c( "JAK-STAT signaling pathway", 
+             "Chemokine signaling pathway",
+             "Cytosolic DNA-sensing pathway",
+             "Signaling pathways regulating pluripotency of stem cells",
+             "Fatty acid elongation",
+             "Wnt signaling pathway")
+
+my_palette <- colorRampPalette(brewer.pal(11, "RdBu"))(10)
+```
+
+
+```{r, fig.width=7, fig.height=4}
+# Create a dot plot using ggplot2
+df %>% 
+  filter(Description %in% listid) %>% 
+  mutate("-log10(pvalue)" = -log10(pvalue)) %>% 
+  ggplot(aes(x = Sign, y = Description, stroke = 1)) +
+ # geom_point(shape = 21, aes(size = -`-log10(pvalue)`, fill = `-log10(pvalue)`)) +
+  geom_point(shape = 21, aes(size = abs(NES), fill = p.adjust), alpha = 0.8) +
+  labs(title = "Selected Enriched Pathways Comparison using KEGG",
+       x = "",
+       y = "") +
+  theme_light()+
+  theme(plot.title = element_text(size=9), strip.text = element_text(color = "black"),  # Change facet label color
+  strip.background = element_rect(color = "black", fill = "lightgray", size = 1) ) +
+  scale_fill_manual(
+    values = c(NA, "black"),
+    guide = guide_legend(override.aes = list(shape = 21))
+  )+
+  scale_fill_gradientn(colors=my_palette)
+```
+
+#### MSigDB
+
+##### C3
+
+```{r,fig.height=4, fig.width=7}
+t2g <- msigdbr(species = "Homo sapiens", category = "C3") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+dotplot(em2, showCategory=100, split=".sign", font.size = 8) + facet_grid(.~.sign)
+```
+
+##### Hallmarks
+
+```{r,fig.height=4, fig.width=7}
+t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=50, split=".sign", font.size = 13) + facet_grid(.~.sign)
+```
+
+## Deconvolution of TH subset
+
+### Extracting gene .list 
+
+```{r}
+ListCTA <- DR_proteins_for_MTHvsMTC 
+subMTH <- CTA_subset %>% filter(SegmentLabelNew=="MTH") %>% select( any_of(ListCTA$biomarker)) %>% t() %>% as.data.frame()
+mean_expr_MTH <- apply(subMTH, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+
+THsubtype <- read_excel("Datafiles/mmc4.xlsx", sheet = "ours s3c") %>% as.data.frame() 
+THsubtype %>% select(`Cell type`) %>% distinct()
+
+THsubtypelist <- THsubtype %>% filter(`Cell type`== "T cells CD4" | `Cell type`== "Tregs" | `Cell type`== "T cells follicular helper" ) %>% select(`Cell type`, `Cell state`, Gene, `Cell surface protein`, `Transcription factor`, `Log2 fold-change in the\r\ndiscovery cohort`, `Avg. fold-change in scRNA-seq data (n7)`)
+
+matchlist <- mean_expr_MTH%>% rownames_to_column("Gene") %>% inner_join(THsubtypelist, by="Gene")
+newdf <- matchlist %>% left_join(subMTH %>% rownames_to_column("Gene") , by="Gene") %>% as.data.frame()
+# # Perform PCA
+# pca_result <- prcomp(newdf[, -c(1:8)], scale = TRUE)
+# 
+# # Create a dataframe with the PCA results and group variable
+# pca_data <- data.frame(pca_result$x, Group = newdf$`Cell type`)
+# 
+# # Plot PCA biplot with color-coded groups
+# fviz_pca_ind(
+#   pca_result,
+#   label = "var",
+#   habillage=newdf$`Cell type`,
+#   geom.ind = "point",
+#   #addEllipses = TRUE,
+#   col.var = "contrib",
+#   palette = "Set1",
+#   title = "PCA Biplot"
+# )
+```
+### Running NMF and calculating proportions
+
+```{r}
+gene_signature_C <- matchlist %>% filter(`Cell type`=="T cells CD4") %>% select(Gene) %>% mutate(GeneID = Gene, Score = 1) %>% select(GeneID, Score)
+gene_signature_B <- matchlist %>% filter(`Cell type`=="T cells follicular helper") %>% select(Gene) %>% mutate(GeneID = Gene, Score = 1) %>% select(GeneID, Score)
+gene_signature_A <- matchlist %>% filter(`Cell type`=="Tregs") %>% select(Gene) %>% mutate(GeneID = Gene, Score = 1) %>% select(GeneID, Score)
+
+bulk_data <- CTA_subset %>% filter(SegmentLabelNew=="MTH") %>% group_by(CoreID) %>%  summarise_if(is.numeric, mean, na.rm = TRUE) %>% column_to_rownames("CoreID")%>% select(matches(DR_proteins_for_MTHvsMTC$biomarker))  %>% as.data.frame() 
+
+library(NMF)
+set.seed(123)
+# Combine the gene signatures into a single matrix
+#gene_signatures <- cbind(gene_signature_A$Score, gene_signature_B$Score, gene_signature_C$Score)
+gene_signatures <- full_join(gene_signature_A, gene_signature_B, by = "GeneID") %>% full_join(gene_signature_C, by = "GeneID") %>% as.data.frame() %>% mutate_all(~ifelse(is.na(.), 0, .)) %>% `colnames<-`(c("GeneID", "Tregs",  "TFH", "TH")) %>% column_to_rownames("GeneID")
+
+# Perform NMF deconvolution
+nmf_result <- nmf(bulk_data, rank = 3, W = gene_signatures)
+
+# Extract the proportions of each subtype
+proportions <- as.data.frame(basis(nmf_result))
+```
+
+### Plots 
+
+```{r}
+proportions %>% melt() %>% ggplot(aes(value, fill = variable)) +
+  geom_density(alpha = 0.5) +
+  theme(legend.position = "top") +
+  scale_fill_manual(values =  brewer.set2(3))+
+  theme_light()+
+  ylab("Density")+
+  xlab("Predictive proportion")
+
+proportions2 <- proportions%>% arrange(TH) %>% t() %>% as.data.frame() %>% scale() 
+
+cubebasis <- pal.compress(cubehelix)
+Heatmap(as.matrix(proportions2), cluster_columns = T, cluster_rows = F, col = colorRampPalette(coolwarm(40))(40), column_names_gp = gpar(0))
+
+# proportions2 %>% t()%>% as.data.frame() %>% rownames_to_column("CoreID") %>% inner_join(CompiledIA, by="CoreID") %>% ggplot(aes(x=`T-H,57- freq`, y = TH)) + 
+#  geom_point()+   sm_corr_theme() + 
+#   sm_statCorr( corr_method = 'pearson')+ 
+#  theme(legend.position = "top") 
+propdf <- proportions2 %>% t()%>% as.data.frame()
+```
+
+
+<!-- ```{r} -->
+<!-- CompiledIA %>%inner_join(CTA_subset %>% filter(SegmentLabelNew=="MTC"), by = "CoreID") %>% group_by(CoreID, SegmentLabelNew) %>%  summarise_if(is.numeric, mean, na.rm = TRUE) %>% distinct() %>% ggplot(aes(x=`T-C,57+ freq`, y = CCL5, colour = SegmentLabelNew, fill =SegmentLabelNew)) +  -->
+<!--  geom_point()+   sm_corr_theme() +  -->
+<!--   sm_statCorr( corr_method = 'pearson')+  -->
+<!--  theme(legend.position = "top")   -->
+
+<!-- CompiledIA %>%inner_join(CTA_subset %>% filter(SegmentLabelNew=="MTH"), by = "CoreID") %>% group_by(CoreID, SegmentLabelNew) %>%  summarise_if(is.numeric, mean, na.rm = TRUE) %>% distinct() %>% ggplot(aes(x=`TH freq`, y = FOXP3, colour = SegmentLabelNew, fill =SegmentLabelNew)) +  -->
+<!--  geom_point()+   sm_corr_theme() +  -->
+<!--   sm_statCorr( corr_method = 'pearson')+  -->
+<!--  theme(legend.position = "top")   -->
+
+<!-- # CTA_subset %>% filter(SegmentLabelNew=="MTH") %>% group_by(CoreID, SegmentLabelNew) %>%  summarise_if(is.numeric, mean, na.rm = TRUE) %>% distinct() %>% ggplot(aes(x=CD25, y = FOXP3, colour = SegmentLabelNew, fill =SegmentLabelNew)) +  -->
+<!-- #  geom_point()+   sm_corr_theme() +  -->
+<!-- #   sm_statCorr( corr_method = 'pearson')+  -->
+<!-- #  theme(legend.position = "top")   -->
+<!-- ``` -->
+
+## Correlation plot 
+
+```{r, fig.width=20, fig.height=20}
+class <- read.csv2("TC vs TH, dist-euclidean feature level.k=6.consensusClass.csv")
+
+
+conflicts_prefer(dplyr::slice)
+THlist <- DR_proteins_for_MTHvsMTC %>% filter(threshold=="Enriched in MTH") %>% arrange(desc(significance)) #%>% slice(1:20)
+TClist <- DR_proteins_for_MTHvsMTC %>% filter(threshold=="Enriched in MTC") %>% arrange(desc(significance)) #%>% slice(1:20)
+
+namelist <- rbind(THlist %>% mutate(Type = "T-H"), TClist %>% mutate(Type = "T-C"))
+
+CTA_subset2_try <- CTA %>% filter(Within.the.tumor=="Tumor-rich")  %>% group_by(PATID, SegmentLabelNew) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+
+CTA_subset2 <- CTA_subset2_try %>% select(rbind(THlist, TClist)[[1]])
+
+gcor <- cor(scale(CTA_subset2), method="spearman")
+
+annotationColumn <- HeatmapAnnotation(CellType=anno_simple(x = namelist$Type,
+                                                        col = c('T-C'='cornsilk2','T-H'='honeydew3'),
+                                                        na_col = '#808080'
+                                                  ), show_legend = F,  annotation_name_side = "left")
+
+annotationrow <- rowAnnotation(CellType=anno_simple(x = namelist$Type,
+                                                        col = c('T-C'='cornsilk2','T-H'='honeydew3'),
+                                                        na_col = '#808080'), show_legend = F)
+
+# Heatmap(gcor, col = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100), column_split = namelist$Type, row_split = namelist$Type, column_title_gp = gpar(fill = c("cornsilk2", "honeydew3")), row_title_gp = gpar(fill = c("cornsilk2", "honeydew3")), heatmap_legend_param = list(title = ""), cluster_rows = T)
+# 
+# set.seed(42)
+# Heatmap(gcor, col = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100), row_km = 6, column_km = 6, heatmap_legend_param = list(title = ""),  top_annotation = annotationColumn, left_annotation = annotationrow, cluster_rows = F, cluster_columns = F)
+# 
+# Heatmap(gcor, col = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100), column_split = class$class, row_split = class$class, heatmap_legend_param = list(title = ""), top_annotation = annotationColumn, left_annotation = annotationrow, cluster_rows = F, cluster_columns = F)
+
+# set.seed(42)
+# Heatmap(gcor, col = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100), clustering_distance_rows = "spearman", clustering_distance_columns  = "spearman",heatmap_legend_param = list(title = ""),  top_annotation = annotationColumn, left_annotation = annotationrow, cluster_rows = T, cluster_columns = T)
+
+# 
+# 
+# CTA_subset2_matrix <- CTA_subset2_try[, -c(1:2)] %>% scale()%>% as.matrix()
+# 
+# set.seed(42)
+# Heatmap(CTA_subset2_matrix, col = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100), column_km = 6, heatmap_legend_param = list(title = ""))
+```
+
+
+```{r, fig.width=15, fig.height=15}
+# row_dend = as.dendrogram(hclust(dist(gcor)))
+# Heatmap(gcor, col = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100), column_title_gp = gpar(fill = c("cornsilk2", "honeydew3")), row_title_gp = gpar(fill = c("cornsilk2", "honeydew3")), heatmap_legend_param = list(title = ""), cluster_rows = row_dend,cluster_columns = row_dend,  top_annotation = annotationColumn, left_annotation = annotationrow)
+
+HT <- Heatmap(gcor, col = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(10), heatmap_legend_param = list(title = ""),row_dend_reorder = TRUE, column_dend_reorder = TRUE, top_annotation = annotationColumn, left_annotation = annotationrow, row_split = 6, column_split = 6, row_gap = unit(2, "mm"), column_gap = unit(2, "mm"),  border = TRUE, row_names_gp = gpar(fontsize = 7),  column_names_gp = gpar(fontsize = 7) )
+
+col_fun <- colorRampPalette(c("cornsilk2", "honeydew3"))(2)
+lgd = Legend(title = "Cell-Type", at = c(0, 1), legend_gp = gpar(fill = c("cornsilk2", "honeydew3")),
+    labels = c("T-C", "T-H"))
+
+pdf("Final Images used for publication/CorrelationPlot.pdf", width = 15, height = 13)
+draw(HT, annotation_legend_list = list(lgd))
+dev.off()
+```
+### Consensus clustering 
+
+```{r}
+library(ConsensusClusterPlus)
+# 
+# CTA_subset2_try <- CTA %>% filter(Within.the.tumor=="Tumor-rich")  %>% group_by(PATID, SegmentLabelNew) %>% summarise_if(is.numeric, mean) %>% ungroup()  %>% mutate(ID = paste0(PATID, SegmentLabelNew))
+# 
+# #CTA_subset2 <- CTA_subset2_try%>% select(ID, rbind(THlist, TClist) [[1]]) %>% t() %>% as.data.frame() %>% row_to_names(1) %>% as.matrix()
+# CTA_subset2 <- CTA_subset2_try%>% select(ID, rbind(THlist, TClist) [[1]]) %>% as.data.frame() %>% column_to_rownames("ID") %>% as.matrix()
+# 
+# ConsensusClusterPlus(d=CTA_subset2, title = "TC vs TH, dist-euclidean feature level", distance = "euclidean", clusterAlg = "km", plot = "pdf", maxK = 10, writeTable = T)
+```
+

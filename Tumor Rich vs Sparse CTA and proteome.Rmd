@@ -1,0 +1,1177 @@
+---
+title: "Comparison of TS vs TR, proteome and CTA"
+author: "Lavanya"
+
+output:
+  BiocStyle::html_document:
+    toc_float: true
+    toc_depth: 5
+vignette: >
+  %\VignetteIndexEntry{Evaluating differential expression patterns in immune subsets from p2104 GeoMX project}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  message = FALSE, warning = FALSE)
+```
+
+# OBJECTIVE OF THE STUDY
+
+The objective of this study is to show that spatial localization of T cells and proximity to tumor play a crucial role in their expression profile. 
+
+- Calling for packages 
+```{r}
+packagelist <- c("reshape", "ggrepel", "brms","lmerTest","ggplot2","dplyr","tidyverse", "visreg", "emmeans","ComplexHeatmap",  "readxl","RColorBrewer","GetoptLong","corrplot","conflicted", "EnvStats", "clusterProfiler", "msigdbr", "ggpubr", "writexl")
+
+for (i in packagelist){
+ suppressPackageStartupMessages(library(i, character.only = TRUE))
+}
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer("qq", "GetoptLong")
+conflict_prefer("select", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflict_prefer("melt", "reshape")
+conflict_prefer("dotplot", "enrichplot")
+```
+
+# Colour palettes used
+
+```{r}
+myPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
+
+cols2 <- brewer.pal(n = 9, name = "Spectral")
+pal1 <- colorRampPalette(cols2)
+
+cols3 <- brewer.pal(n = 11, name = "PuRd")
+pal2 <- colorRampPalette(cols3)
+
+customGreen0 = "#DeF7E9"
+customGreen = "#71CA97"
+customRed = "#ff7f7f"
+
+cols = c("Enriched in High" = "deeppink1", "Enriched in Low" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+
+
+sizes <- c("High" = 2, "Low" = 2, "ns" = 1, "DE" = 2)
+
+my_colour = list(Direction = c("High" = "#5977ff", "Low" = "#f74747"), `Within the tumor` = c("Away" = "#1B9E77", "Within"="#D95F02"))
+heatmap_color <- colorRampPalette(c("green", "black", "firebrick3"))(50)
+```
+
+# Input files
+
+## Expression files
+
+```{r}
+CTA <- readxl::read_xlsx("Datafiles/Project_3_immune_MTC_MTH.Dec2023 names updated.xlsx") %>% as.data.frame()  %>% mutate(Within.the.tumor = ifelse(Within.the.tumor.postSE == "Tumor-rich", "Tumor-rich", "Tumor-sparse")) %>% relocate(Within.the.tumor, .after = "CoreID") 
+
+n <- 1481 ## total number of probes excluding NPC
+s <- ncol(CTA)-n 
+startwithNPC <- s-1 
+e <- ncol(CTA)
+
+head(CTA[,s:e])
+
+Proteome <- readxl::read_xlsx("Datafiles/Project2_Protein_all immune subtypes.Dec2023 names updated.xlsx") %>% as.data.frame()  %>% rename( "Within.the.tumor"="Within.the.tumor_June2023") 
+
+np <- 62 ## no of markers (-NF1)
+e <- ncol(Proteome)
+s <- e-np+1
+
+head(Proteome[,s:e])
+
+tumorprotein <- read_excel("Datafiles/PCD20.Dec2023 names updated.xlsx") %>% as.data.frame() 
+tumormrna <- read_excel("Datafiles/MCD20.Dec2023 names updated.xlsx") %>% as.data.frame() 
+
+tumormrna %>% select(PATID) %>% distinct()
+```
+
+
+## Clinical data updated November 2022
+
+```{r} 
+newclinicaldata <- read_excel("Datafiles/BLISS DATABASE NOVEMBER 2022 - NBIS.xlsx") %>% as.data.frame()
+```
+
+## IHC analysis file
+
+```{r} 
+ihcanalysis <- read_excel("Datafiles/RESULTS IHC.xlsx") %>% as.data.frame()
+```
+
+## updating files 
+
+```{r}
+`%Notin%` <- Negate(`%in%`)
+test <- inner_join(Proteome  %>% 
+                     dplyr::filter(Within.the.tumor=="Tumor-sparse") %>% 
+                     dplyr::select(PATID, SegmentLabel) %>% 
+                     mutate(combined = paste0(PATID, SegmentLabel)), 
+                   Proteome %>% dplyr::filter(Within.the.tumor=="Tumor-rich") %>% 
+                     dplyr::select(PATID, SegmentLabel)%>% 
+                     mutate(combined = paste0(PATID, SegmentLabel)), 
+                   by = "combined") 
+
+paired_pat <- unique(test$PATID.x)
+
+
+Proteome <- Proteome %>% mutate(TYPETUMOR = ifelse(PATID %in% paired_pat & Within.the.tumor=="Tumor-sparse", "TS zone", ifelse(PATID %in% paired_pat & Within.the.tumor=="Tumor-rich", "TR zone close to TS", "TR zone away from TS"))) %>% relocate(TYPETUMOR, .after = "PATID")
+
+np <- 63 ## no of markers (- histone_H3)
+e <- ncol(Proteome)
+s <- e-np+1
+
+testCTA <- inner_join(CTA %>% dplyr::filter(Within.the.tumor=="Tumor-sparse") %>% dplyr::select(PATID, SegmentLabelNew) %>% mutate(combined = paste0(PATID, SegmentLabelNew)), CTA %>% dplyr::filter(Within.the.tumor=="Tumor-rich") %>% dplyr::select(PATID, SegmentLabelNew)%>% mutate(combined = paste0(PATID, SegmentLabelNew)), by = "combined") 
+
+# testCTA2 <- CTA %>% dplyr::filter(Within.the.tumor=="Tumor-sparse")  %>% select(PATID) %>% distinct()
+# # 
+# # 
+# CTApairedfile <- rbind(CTA %>% dplyr::filter(Within.the.tumor=="Tumor-sparse") %>% filter(PATID %in% testCTA2$PATID) , CTA %>% dplyr::filter(Within.the.tumor=="Tumor-rich")%>% filter(PATID %in% testCTA2$PATID) )
+
+paired_patCTA <- unique(testCTA$PATID.x)
+
+CTA <- CTA %>% as.data.frame()%>% mutate(TYPETUMOR = 
+                                           ifelse(
+                                             PATID %in% paired_patCTA & Within.the.tumor=="Tumor-sparse", 
+                                             "TS zone", 
+                                             ifelse(PATID %in% paired_patCTA & Within.the.tumor =="Tumor-rich", 
+                                                    "TR zone close to TS", 
+                                                    ifelse(PATID %Notin% paired_patCTA & Within.the.tumor=="Tumor-sparse", 
+                                                           "Unpaired TS", 
+                                                           "TR zone away from TS")))) %>% relocate(TYPETUMOR, .after = "PATID")
+
+n <- 1482 
+s <- ncol(CTA)-n +1
+e <- ncol(CTA)
+startwithNPC <- s-1 
+```
+
+# USEFUL LINKS
+
+http://rinterested.github.io/statistics/mixed_effects_comparison.html
+https://cran.r-project.org/web/packages/emmeans/vignettes/interactions.html 
+https://www.zoology.ubc.ca/~bio501/R/workshops/lme.html
+https://cran.r-project.org/web/packages/dotwhisker/vignettes/dotwhisker-vignette.html
+https://ourcodingclub.github.io/tutorials/modelling/
+https://ourcodingclub.github.io/tutorials/mixed-models/
+https://jofrhwld.github.io/teaching/courses/2018_multivariate/lectures/week_5.nb.html 
+https://stats.stackexchange.com/questions/161703/linear-regression-vs-linear-mixed-effect-model-coefficients
+https://www.rensvandeschoot.com/tutorials/generalised-linear-models-with-glm-and-lme4/ 
+https://www.ssc.wisc.edu/sscc/pubs/MM/MM_Models.html 
+
+# SELECTION OF THE BEST FORMULA 
+
+Prior to running this chunk, I ran model1 which is the basic LME model (descibed in this chunk) for the volcano, plots binary function (stored in Function list.R). This was done to identify variables which are differentially modulated in the fixed effect. Based on these a few variables were arbitarily selected - CD4, CD8 and VISTA and this chunk was run several times to further develop better models. 
+Steps are proposed as such - 
+- Figure out what variables are modulating in your study design that want to compare 
+- identify your fixed and random effects 
+- Develop multiple models with different fixed and random effect models. Also have model0 which is generalized linear model without mixed effects
+Here i am comparing 4 designs, this is just an example . Feel free to add more test, there is no limit.
+
+NOTE0: Stick to the biomarker that you know is variable between the main condition group. SO here we know that PanCk which was used as a morphology marker for selection should be variable between segment types. Alternatively, you can run the volcano with the most basic formulation and double check the design with the variable that has the highest/lowest coeffficient change. 
+NOTE1: It is important to ensure that you sort out the design before trying to finalize the model and run the volcano below. This is to ensure that you remove all possible random effects from your data associated with these technical variables. ALTERNATIVELY, filtering out your dataste before running the main models is a good strategy (like select on the segment or even tissue type)
+NOTE2: If any 2 factors in your design have linear dependency on each other. that formula will not work. So, for example, if i use PatientID as a variable and lets say Age which is a patient dependent factor, then it would give you an error. SO, in that case, run the models individually and see which is better. 
+
+In this study - 
+Fixed Effect - Within_the_tumor
+Random Effects - Patient ID, Tissue_type and Scan_ID 
+
+Before running the model, isolate the right data subset. Here we are taking on patients which have both MCL-adjacent and Tumor-rich. 
+
+Initially model
+```{r}
+# model0 <- lm(as.formula("VISTA ~ Within.the.tumor"), data = Proteome_subset) ##generalized linear model
+# model00 <- lmerTest::lmer(formula = as.formula("VISTA ~ 1 + (1|PATID)"), data = Proteome_subset, REML=FALSE) ## reduced mixed model with 0 fixed effects. I analyzed this but it doesnt really change anything 
+# model1 <- lmerTest::lmer(formula = as.formula("VISTA ~ Within.the.tumor + (1|PATID)"), data = Proteome_subset, REML=FALSE) ## baseline mixed model 
+# # model2 <- lmerTest::lmer(formula = as.formula("VISTA ~ Within.the.tumor + (1|Tissue_type_modified) +  (1|PATID)"), data = Proteome_subset, REML=FALSE)
+# model3 <- lmerTest::lmer(formula = as.formula("VISTA ~ Within.the.tumor + Tissue_type_modified +  (1|PATID)"), data = Proteome_subset, REML=FALSE)
+```
+ 
+## Comparing the models
+
+- Visualization of Regression Models - only for 1 and 3 (the other 2 dont have an effect term). 
+- The Akaike Information Criteria is a good criterion of the quality of the model. It tends to penalize adding extra predictors (overfitting). The models with the lowest AIC values are best. AIC can be used for all model comparison, but they provide better info for non-nested models
+- Alternatively we can run ANOVA tests on the models, especially for nested
+
+FOR COMPARING MODELS - is you compare "a+b" vs "a+b+c", both AIC and ANOVA will give the same result 
+However, if you compare "a+b" vs "a*b" or any other operator which is not '+' then you moght get different models for AIC and ANOVA, in which case you go with AIC results as it works better for nested formula designs
+```{r}
+## used to visualizse GLMs quickly to see if the pred is accurate
+## Not important if you dont want to do it, but could provide better visual represntation 
+# visreg(model1, xvar = "Within.the.tumor")
+# visreg(model2, xvar = "Within.the.tumor", by = "Tissue_type_modified", overlay = TRUE,data = Proteome_subset)
+# 
+# AIC_compare <- AIC(model0, model1, model2)
+# AIC_compare$BIC  <- BIC(model0,model1,model2)[[2]]
+# formattable::formattable(AIC_compare, align =c("l","c","c","c"), list(`AIC`= color_tile(customRed, "white")))
+# 
+# anova_compare <- anova(model1,model2,model0, test = "Chisq")
+# formattable::formattable(anova_compare, align =c("l","c","c","c", "c","c","c", "c"), list(`Pr(>Chisq)`= color_tile(customRed, "white"), `Chisq`= color_tile(customGreen0, customGreen)))
+```
+
+```{r}
+# class(model00) <- "lmerMod"
+# class(model1) <- "lmerMod"
+# class(model3) <- "lmerMod"
+# stargazer::stargazer( model0, model00, model1, model3,type = "text",digits = 2,star.cutoffs = c(0.05, 0.01, 0.001),digit.separator = "", omit.stat=c("LL","ser","f"), single.row=TRUE, title="Comparing linear mixed models", ci.level=0.90, ci=TRUE)
+```
+
+## Testing for Number_of_scans (ScanID)
+
+```{r}
+# model4 <- lmerTest::lmer(formula = as.formula("VISTA ~ Within.the.tumor + (1|Number_of_scans) +  (1|PATID)"), data = Proteome_subset)
+# model5 <- lmerTest::lmer(formula = as.formula("VISTA ~ Within.the.tumor + (1|Number_of_scans)"), data = Proteome_subset)
+# 
+# visreg(model1, xvar = "Within.the.tumor")
+# visreg(model4, xvar = "Within.the.tumor", by = "Number_of_scans", overlay = TRUE,data = Proteome_subset)
+# visreg(model5, xvar = "Within.the.tumor", by = "Number_of_scans", overlay = TRUE,data = Proteome_subset)
+# 
+# AIC_compare <- AIC(model0, model1, model4)
+# AIC_compare$BIC  <- BIC(model0,model1,model4)[[2]]
+# formattable::formattable(AIC_compare, align =c("l","c","c","c"), list(`AIC`= color_tile(customRed, "white")))
+# 
+# anova_compare <- anova(model1,model4,model0, test = "Chisq")
+# formattable::formattable(anova_compare, align =c("l","c","c","c", "c","c","c", "c"), list(`Pr(>Chisq)`= color_tile(customRed, "white"), `Chisq`= color_tile(customGreen0, customGreen)))
+# 
+# AIC_compare <- AIC(model0, model1, model5)
+# AIC_compare$BIC  <- BIC(model0,model1,model5)[[2]]
+# formattable::formattable(AIC_compare, align =c("l","c","c","c"), list(`AIC`= color_tile(customRed, "white")))
+# 
+# anova_compare <- anova(model1,model5, test = "Chisq")
+# formattable::formattable(anova_compare, align =c("l","c","c","c", "c","c","c", "c"), list(`Pr(>Chisq)`= color_tile(customRed, "white"), `Chisq`= color_tile(customGreen0, customGreen)))
+# 
+# summary(model4)
+```
+
+```{r}
+# class(model1) <- "lmerMod"
+# class(model4) <- "lmerMod"
+# stargazer::stargazer( model0, model1,type = "text",digits = 2,star.cutoffs = c(0.05, 0.01, 0.001),digit.separator = "", omit.stat=c("LL","ser","f"), single.row=TRUE, align=TRUE, title="Comparing linear mixed models", ci.level=0.90, ci=TRUE,  dep.var.labels=c("Generalized Linear model","Linear mixed model"))
+```
+
+Checking for nested relationship between Within_the_tumor as FE and PATID as RE
+```{r}
+# model6 <- lmerTest::lmer(formula = as.formula("VISTA ~ Within.the.tumor + (Within.the.tumor|PATID)"), data = Proteome_subset, REML=FALSE)
+# model7 <- lmerTest::lmer(formula = as.formula("VISTA ~ Within.the.tumor + (1 + Within.the.tumor|PATID)"), data = Proteome_subset, REML=FALSE) ##for random intercept and random slopes
+# 
+# visreg(model6, xvar = "Within.the.tumor")
+# visreg(model7, xvar = "Within.the.tumor",  overlay = TRUE,data = Proteome_subset)
+# 
+# AIC_compare <- AIC(model1, model6, model7)
+# AIC_compare$BIC  <- BIC(model1, model6, model7)[[2]]
+# formattable::formattable(AIC_compare, align =c("l","c","c","c"), list(`AIC`= color_tile(customRed, "white")))
+# 
+# anova_compare <- anova(model1, model6, model7, test = "Chisq")
+# formattable::formattable(anova_compare, align =c("l","c","c","c", "c","c","c", "c"), list(`Pr(>Chisq)`= color_tile(customRed, "white"), `Chisq`= color_tile(customGreen0, customGreen)))
+# ```
+# ```{r}
+# class(model6) <- "lmerMod"
+# class(model7) <- "lmerMod"
+# stargazer::stargazer( model1, model6, model7,type = "text",digits = 2,star.cutoffs = c(0.05, 0.01, 0.001),digit.separator = "", omit.stat=c("LL","ser","f"), single.row=TRUE, title="Comparing linear mixed models", ci.level=0.90, ci=TRUE)
+```
+
+```{r}
+#_______________________________________________________
+## if you want to plot individual models to look at the residuals, follow the following line 
+## residual plots
+# plot(model1, which = 1)
+# plot(model6, which = 1)
+# ## qq plot
+# plot(model1, which = 2)
+# plot(model6, which = 2)
+# 
+# qqnorm(resid(model1))
+# qqline(resid(model1))  # points fall nicely onto the line - good!
+# qqnorm(resid(model6))
+# qqline(resid(model6))
+# 
+# # Visualise random effects 
+# plot_model(model1, type = "re", show.values = TRUE, show.legend = TRUE, value.offset = c(-1,-1),bpe = "mean", vline.color = "black", value.size = 3,dot.size = 3,colors = wes_palette("Darjeeling1", n = 3), line.size = 0.7, width = 0.5)
+# 
+# # (re.effects <- plot_model(model6, type = "re", show.values = TRUE))
+# 
+# AIC_compare <- AIC(model1, model6)
+# AIC_compare$BIC  <- BIC(model1, model6)[[2]]
+# formattable::formattable(AIC_compare, align =c("l","c","c","c"), list(`AIC`= color_tile(customRed, "white")))
+# 
+# anova_compare <- anova(model1, model6, test = "Chisq")
+# formattable::formattable(anova_compare, align =c("l","c","c","c", "c","c","c", "c"), list(`Pr(>Chisq)`= color_tile(customRed, "white"), `Chisq`= color_tile(customGreen0, customGreen)))
+```
+
+## Interaction analysis in emmeans
+
+To specify, Type 1 or 2 ANOVA. for your final model, run ANOVA to check whether your response variables are interacting 
+
+```{r}
+## Visualize the interaction between your  varibake 
+# emmip(model1, PATID ~ Within_the_tumor) ##  for additional variables emmip(model3, CD163.image ~ Segment_type| Var2)
+# emmip(model1, Within_the_tumor ~ Gender) ## Such interactions are also a good way of understanding what needs to be used in model formula, READ THE LINK ABOVE 
+# emmeans(model1, specs = c("Within_the_tumor"), data = Proteome_subset) %>% as.data.frame()
+# joint_tests(model6)%>% as.data.frame()
+```
+
+# CONCLUSION 1
+
+PatiendID is a crucial random effect. Tissue-type and Number_of_scans (ScanID) plays no significant role as random effect and is not needed in the model. Reduced LMER model is not needed either. 
+
+
+# CONCLUSION 2: 
+
+There is no change between model 6 and 7 (with random slopes). Now the decision is between model 6 and model 1. it would seem that there is an nested effect between Within_the_tumor and PATID. Does that make biological sense. Since,  patients both regions would be accounted within PATID. 
+
+NOTE - THIS ANALYSIS WAS DONE PREVIOUSLY AND HENCE HAS BEEN MARKED OUT HERE. 
+
+## Compare Means analysis functions
+
+```{r}
+decide_test <- function(p_value) {
+  test_type <- ifelse(p_value < 0.05, "wilcox", "t")
+  return(test_type)
+}
+
+perform_test <- function(New) {
+  grouped_df <- New %>%
+    group_by(Within.the.tumor)
+ 
+  shapiro_results <- grouped_df %>%
+    summarise_if(is.numeric, ~ shapiro.test(.)$p.value)
+  
+  test_types <- shapiro_results %>% ungroup()%>% as.data.frame()%>% 
+     summarise(across(everything(), decide_test)) 
+  
+  finaldf <- test_types %>% ungroup()%>% t()  %>% as.data.frame() %>% drop_na() %>%  mutate(method = ifelse(V1 == "t" & V2 == "t", "t.test", "wilcox"))
+
+
+  obj <- list()
+  
+  for (i in rownames(finaldf)) {
+    smalldf <- New %>% select(PATID, Within.the.tumor, i)  %>% pivot_wider(names_from = Within.the.tumor, values_from = i)
+   
+    
+    if(finaldf[i,3] == "wilcox") {
+      test_result <- wilcox.test(smalldf$`Tumor-rich`, smalldf$`Tumor-sparse`, paired = T)
+      obj[[i]] <-  cbind(biomarker = i, method = "Wilcoxon", Pvalue = test_result$p.value)
+      
+      } else if(finaldf[i,3] == "t.test") {
+      test_result <- t.test(smalldf$`Tumor-rich`, smalldf$`Tumor-sparse`, paired = T)
+      obj[[i]] = cbind(biomarker =i,  method = "T Test",Pvalue = test_result$p.value)
+      } else {
+     stop("Invalid test type. Choose either 'wilcox' or 't'.")
+      }
+  
+  }
+  
+  result <- do.call(rbind,obj)%>% as.data.frame()
+
+return(result)
+}
+```
+
+# MAIN ANALYSIS1 - PROTEOME - DOES SPATIAL LOCALIZATION AFFECT T-CELL EXPRESSION
+
+Once you have finallized your model from the above steps. change the formula and run thsi chunk. 
+In this step, we are staying that given the expression of nth variable, define the variable as a function of tumor region while accounting for patient replication bias. Here we are testing model1 
+
+In the chunk 
+- Here change the coeff - threshold for the change you want to see 
+- Here change the fdr pvalue thresholds 
+- Here change the reflevel you wish to use as reference
+
+## TR vs TS paired
+
+```{r dev = "png"}
+source("Function list.R") 
+
+cols = c("Enriched in Tumor-rich" = "deeppink1", "Enriched in Tumor-sparse" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+Proteome_2 <-  Proteome %>% filter(TYPETUMOR!="TR zone away from TS")
+np <- 62 ## no of markers (- histone_H3)
+e <- ncol(Proteome)
+s <- e-np+1
+
+annot_file <- c("TYPETUMOR", "Within.the.tumor")
+
+Proteome_2 %>% select(PATID) %>% distinct()
+```
+
+### Early Helper
+
+```{r dev = "png"}
+Proteome_subset <- Proteome_2 %>% filter(SegmentLabelNew == "PTH")
+
+Final <- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Early Helper", formula = "~ Within.the.tumor + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", binary_group = "Within.the.tumor", name = "EH_TRvsTS_paired" , ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/EH_TRvsTS_paired.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, Within.the.tumor, c(s:e)) %>% group_by(PATID, Within.the.tumor) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$Within.the.tumor=as.factor(New$Within.the.tumor)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTableEH <-   DR_proteins_for_EH_TRvsTS_paired %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTableEH, "Final Images used for publication/DR_proteins_for_EH_TRvsTS_paired.xlsx")
+```
+
+### Early Cytotoxic
+
+```{r dev = "png"}
+Proteome_subset <- Proteome_2 %>% filter(SegmentLabelNew == "PTC")
+
+Final <- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Early Cytotoxic", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", formula = "~ Within.the.tumor + (1|PATID)", name ="EC_TRvsTS_paired", ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/EC_TRvsTS_paired.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, Within.the.tumor, c(s:e)) %>% group_by(PATID, Within.the.tumor) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$Within.the.tumor=as.factor(New$Within.the.tumor)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTableEC <-   DR_proteins_for_EC_TRvsTS_paired %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTableEC, "Final Images used for publication/DR_proteins_for_EC_TRvsTS_paired.xlsx")
+```
+```{r}
+total <- full_join(CombinedTableEC,CombinedTableEH, by = "biomarker") 
+write_xlsx(total, "Final Images used for publication/LMM and pairwise for EH and EC.xlsx")
+
+```
+
+### Late Cytotoxic
+
+```{r dev = "png"}
+Proteome_subset <- Proteome_2 %>% filter(SegmentLabelNew == "PTC57")
+
+Final <- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Late Cytotoxic", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05,   coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", formula = "~ Within.the.tumor + (1|PATID)", name = "LC_TRvsTS_paired", ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/LC_TRvsTS_paired.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, Within.the.tumor, c(s:e)) %>% group_by(PATID, Within.the.tumor) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$Within.the.tumor=as.factor(New$Within.the.tumor)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTable <-   DR_proteins_for_LC_TRvsTS_paired%>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTable, "Final Images used for publication/DR_proteins_for_LC_TRvsTS_paired.xlsx")
+```
+
+### Late Helper
+
+```{r dev = "png"}
+Proteome_subset <- Proteome_2 %>% filter(SegmentLabelNew == "PTH57")
+
+Final <- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Late Helper", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", formula = "~ Within.the.tumor + (1|PATID)", name = "LH_TRvsTS_paired", ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/LH_TRvsTS_paired.pdf")
+Final
+dev.off()
+
+New  <- Proteome_subset %>% select(PATID, Within.the.tumor, c(s:e)) %>% group_by(PATID, Within.the.tumor) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$Within.the.tumor=as.factor(New$Within.the.tumor)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTable <-   DR_proteins_for_LH_TRvsTS_paired%>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTable, "Final Images used for publication/DR_proteins_for_LH_TRvsTS_paired.xlsx")
+```
+
+<!-- ## TR vs TS unpaired -->
+
+<!-- ### Early Helper -->
+
+<!-- ```{r dev = "png"} -->
+<!-- ## Without removing the TR Away -->
+
+<!-- volcano_plots_binary(data=Proteome,subset=TRUE, ROI_type = "Early Helper", formula = "~ Within.the.tumor + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", binary_group = "Within.the.tumor", name = "EH_TRvsTS_unpaired" , ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### Early Cytotoxic -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary(data=Proteome,subset=TRUE, ROI_type = "Early Cytotoxic", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", formula = "~ Within.the.tumor + (1|PATID)", name ="EC_TRvsTS_unpaired", ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### Late Cytotoxic -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary(data=Proteome,subset=TRUE, ROI_type = "Late Cytotoxic", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05,   coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", formula = "~ Within.the.tumor + (1|PATID)", name = "LC_TRvsTS_unpaired", ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### Late Helper -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary(data=Proteome,subset=TRUE, ROI_type = "Late Helper", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabel", formula = "~ Within.the.tumor + (1|PATID)", name = "LH_TRvsTS_unpaired", ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ## TR vs TR unpaired -->
+
+<!-- ### Early Helper -->
+
+<!-- ```{r dev = "png"} -->
+<!-- Proteome_subset <-  Proteome %>% filter(TYPETUMOR!="TS zone") -->
+<!-- cols = c("Enriched in TR zone away from TS" = "deeppink1", "Enriched in TR zone close to TS" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1") -->
+
+<!-- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Early Helper", formula = "~ TYPETUMOR + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "TR zone close to TS", contrastlevel = "TR zone away from TS", subset_cat = "SegmentLabel", binary_group = "TYPETUMOR", name = "EH_TRvsTR_unpaired" , ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### Early Cytotoxic -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Early Cytotoxic", binary_group = "TYPETUMOR",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "TR zone close to TS", contrastlevel = "TR zone away from TS", subset_cat = "SegmentLabel", formula = "~ TYPETUMOR + (1|PATID)", name ="EC_TRvsTR_unpaired", ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### Late Cytotoxic -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Late Cytotoxic", binary_group = "TYPETUMOR",biom_trans=NULL,p_sig=0.05,   coeff_thresh = 0, reflevel = "TR zone close to TS", contrastlevel = "TR zone away from TS", subset_cat = "SegmentLabel", formula = "~ TYPETUMOR + (1|PATID)", name = "LC_TRvsTR_unpaired", ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### Late Helper -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary(data=Proteome_subset,subset=TRUE, ROI_type = "Late Helper", binary_group = "TYPETUMOR",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0,reflevel = "TR zone close to TS", contrastlevel = "TR zone away from TS", subset_cat = "SegmentLabel", formula = "~ TYPETUMOR + (1|PATID)", name = "LH_TRvsTR_unpaired", ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+## CONCLUSION 3
+
+There is no difference between tumor-rich close and away from sparse areas for the proteome. TR vs TS paired vs unpaired gived similar results
+
+## Making compiled plot using paired 
+
+```{r, fig.width=10, fig.height=3}
+EH <- DR_proteins_for_EH_TRvsTS_paired %>% filter(DE=="DE")
+EC<- DR_proteins_for_EC_TRvsTS_paired%>% filter(DE=="DE")
+# LH <- DR_proteins_for_LH_TRvsTS_unpaired%>% filter(DE=="DE")
+# LC <- DR_proteins_for_LC_TRvsTS_unpaired%>% filter(DE=="DE")
+
+hmdf <- full_join(EH, EC, by = "biomarker") %>% 
+  rename(c("T-H,57-"="threshold.x", "T-C,57-"="threshold.y"))  %>% dplyr::select(biomarker, "T-H,57-", "T-C,57-") %>% 
+  melt(id.vars="biomarker") %>% arrange(value)
+
+hmdf$biomarker <- factor(hmdf$biomarker, levels = unique(hmdf$biomarker))
+
+# Plot the data
+
+plot <- hmdf %>% ggplot(aes(x=biomarker, y=variable, fill=value))+
+  geom_tile() +
+  #scale_color_manual(na.value = "white", values = c( "#74a9cf",  "#feb24c","#88419d", "#ef3b2c"))+
+   scale_fill_manual(na.value = "white",values = c(  "#f768a1","royalblue"))+
+ labs(x = "", y = "", fill = "T-cell Type") +
+   theme(axis.text.x = element_text(size = 9, angle = 45, hjust = 1, vjust = 1), axis.ticks.length.x = unit(1.0, "mm"),axis.ticks.x = element_line(size = 0.1),axis.title.y = element_text(size = 5),panel.background = element_rect(fill = "white"),panel.border = element_rect(fill = NA), legend.position = "top", legend.title = element_blank(), legend.text = element_text(size = 9), axis.text.y = element_text(size=9), legend.key.size = unit(1, 'mm')) 
+plot
+
+pdf("Final Images used for publication/Compiled Tile Plot TR vs TS.pdf")
+plot
+dev.off()
+```
+
+# MAIN ANALYSIS2 - CTA - DOES SPATIAL LOCALIZATION AFFECT T-CELL EXPRESSION
+
+There is a huge difference between tumor-rich and tumor-sparse (paired unpaired doesnt matter). However, patients with no TS zone, vs patients without - did not have any phenotypic difference. 
+Thus, the main difference seems to be the relative density of surrounding cells.
+
+## TR vs TS paired
+
+```{r dev = "png"}
+source("Function list CTA.R") 
+
+cols = c("Enriched in Tumor-rich" = "deeppink1", "Enriched in Tumor-sparse" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1")
+CTA2 <-  CTA %>% filter(TYPETUMOR!="TR zone away from TS" & TYPETUMOR!="Unpaired TS")
+
+n <- 1482 
+s <- ncol(CTA)-n +1
+e <- ncol(CTA)
+
+annot_file <- c("TYPETUMOR", "Within.the.tumor")
+
+CTA2 %>% select(PATID) %>% distinct()
+```
+
+### MTH
+
+```{r dev = "png"}
+CTA_subset <- CTA2 %>% filter(SegmentLabelNew == "MTH")
+
+Final <- volcano_plots_binary_CTA(data=CTA_subset,subset=TRUE, ROI_type = "MTH", formula = "~ Within.the.tumor + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabelNew", binary_group = "Within.the.tumor", name = "CTA_MTH_TRvsTS_paired", s = s, e = e, n = n, ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/CTA_MTH_TRvsTS_paired.pdf")
+Final
+dev.off()
+
+New  <- CTA_subset %>% select(PATID, Within.the.tumor, c(s:e)) %>% group_by(PATID, Within.the.tumor) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$Within.the.tumor=as.factor(New$Within.the.tumor)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTableTH <-   DR_proteins_for_CTA_MTH_TRvsTS_paired %>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTableTH, "Final Images used for publication/DR_proteins_for_CTA_MTH_TRvsTS_paired.xlsx")
+```
+
+### MTC
+
+```{r dev = "png"}
+CTA_subset <- CTA2 %>% filter(SegmentLabelNew == "MTC")
+
+Final <- volcano_plots_binary_CTA(data=CTA_subset,subset=TRUE, ROI_type = "MTC", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabelNew", formula = "~ Within.the.tumor + (1|PATID)", name ="CTA_MTC_TRvsTS_paired", s = s, e = e, n = n, ctrl_biom=TRUE)
+
+pdf("Final Images used for publication/CTA_MTC_TRvsTS_paired.pdf")
+Final
+dev.off()
+
+New  <- CTA_subset %>% select(PATID, Within.the.tumor, c(s:e)) %>% group_by(PATID, Within.the.tumor) %>% summarise_if(is.numeric, mean) %>% ungroup() 
+New$Within.the.tumor=as.factor(New$Within.the.tumor)
+
+compareMeansdf <- perform_test(New)
+
+CombinedTableTC <-   DR_proteins_for_CTA_MTC_TRvsTS_paired%>% inner_join(compareMeansdf, by = "biomarker") 
+write_xlsx(CombinedTableTC, "Final Images used for publication/DR_proteins_for_CTA_MTC_TRvsTS_paired.xlsx")
+```
+
+```{r}
+Combinedfile <- full_join(CombinedTableTC, CombinedTableTH, by = "biomarker")
+write_xlsx(Combinedfile, "Final Images used for publication/LMM and pairwise for TC and TH.xlsx")
+```
+
+
+## Venn Plots
+
+```{r}
+library(VennDiagram)
+ListMTC <- DR_proteins_for_CTA_MTC_TRvsTS_paired %>% filter(threshold == "Enriched in Tumor-rich") 
+ListMTH <- DR_proteins_for_CTA_MTH_TRvsTS_paired %>% filter(threshold == "Enriched in Tumor-rich") 
+
+x <- list(TC = ListMTC$biomarker, TH = ListMTH$biomarker)
+
+v <- venn.diagram(list(TC = ListMTC$biomarker, TH = ListMTH$biomarker), fill = c("red", "blue"), alpha = 0.5,
+             scaled = FALSE, cex = 2, cat.cex = 2, cat.col = c("black", "black"),
+             filename = NULL)
+grid.newpage()
+grid.draw(v)
+# lapply(v,  names)
+# 
+# lapply(v, function(i) i$label)
+# 
+#  conflicts_prefer(base::setdiff)
+# 
+# v[[5]]$label  <- paste(setdiff( ListMTC$biomarker,  ListMTH$biomarker), collapse="\n")  
+# 
+# v[[6]]$label <- paste(setdiff( ListMTH$biomarker,  ListMTC$biomarker)  , collapse="\n")  
+# 
+# v[[7]]$label <- paste(intersect( ListMTC$biomarker,  ListMTH$biomarker), collapse="\n")  
+# 
+# grid.newpage()
+# grid.draw(v)
+```
+
+```{r, echo=FALSE}
+
+
+# Your code to generate the Venn diagram
+v <- venn.diagram(
+  list(TC = ListMTC$biomarker, TH = ListMTH$biomarker), 
+  fill = c("red", "blue"), 
+  alpha = 0.5,
+  scaled = FALSE, 
+  cex = 0.5, 
+  cat.cex = 2, 
+  cat.col = c("black", "black"),
+  filename = NULL,
+  margin = 0.1  # Adjust the margin between label columns
+)
+
+# Update the labels
+# v[[5]]$label <- paste(setdiff(ListMTC$biomarker, ListMTH$biomarker),
+# collapse="\n") v[[6]]$label <- paste(setdiff(ListMTH$biomarker,
+# ListMTC$biomarker), collapse="\n") v[[7]]$label <-
+# paste(intersect(ListMTC$biomarker, ListMTH$biomarker), collapse="\n")
+#
+# # Set the maximum number of columns for labels max_columns <- 3
+#
+# # Set the layout of the labels label_layout <- matrix(1:3, ncol = max_columns,
+# byrow = TRUE)
+#
+# # Update the layout of the labels v$label$layout <- label_layout
+
+# Draw the plot
+grid.newpage()
+grid.draw(v)
+```
+
+
+<!-- ## TR vs TS unpaired -->
+
+<!-- ### MTH  -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary_CTA(data=CTA,subset=TRUE, ROI_type = "MTH", formula = "~ Within.the.tumor + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabelNew", binary_group = "Within.the.tumor", name = "CTA_MTH_TRvsTS_unpaired", s = s, e = e, n = n, ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### MTC -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary_CTA(data=CTA,subset=TRUE, ROI_type = "MTC", binary_group = "Within.the.tumor",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "Tumor-sparse", contrastlevel = "Tumor-rich", subset_cat = "SegmentLabelNew", formula = "~ Within.the.tumor + (1|PATID)", name ="CTA_MTC_TRvsTS_unpaired", s = s, e = e, n = n, ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ## TR vs TR unpaired -->
+
+<!-- ```{r dev = "png"} -->
+<!-- cols = c("Enriched in TR zone away from TS" = "deeppink1", "Enriched in TR zone close to TS" = "royalblue2", "ns" = "lavenderblush4","DE" = "goldenrod1") -->
+<!-- CTA_subset <-  CTA %>% filter(Within.the.tumor!="Tumor-sparse") -->
+<!-- ``` -->
+
+<!-- ### MTH -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary_CTA(data=CTA_subset,subset=TRUE, ROI_type = "MTH", formula = "~ TYPETUMOR + (1|PATID)",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "TR zone close to TS", contrastlevel = "TR zone away from TS", subset_cat = "SegmentLabelNew", binary_group = "TYPETUMOR", name = "CTA_MTH_TRvsTR_unpaired", s = s, e = e, n = n, ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+<!-- ### MTC -->
+
+<!-- ```{r dev = "png"} -->
+<!-- volcano_plots_binary_CTA(data=CTA_subset,subset=TRUE, ROI_type = "MTC", binary_group = "TYPETUMOR",biom_trans=NULL,p_sig=0.05, coeff_thresh = 0, reflevel = "TR zone close to TS", contrastlevel = "TR zone away from TS", subset_cat = "SegmentLabelNew", formula = "~ TYPETUMOR + (1|PATID)", name ="CTA_MTC_TRvsTR_unpaired", s = s, e = e, n = n, ctrl_biom=TRUE) -->
+<!-- ``` -->
+
+## CONCLUSION 4: 
+
+For the proteome, TR vs TS paired or unpaired doesnt matter. They give similar results. There is no difference between TR zones away and close by. 
+
+For the CTA, TR vs TS paired vs unpaired gives significant results for T-cell expression based on spatial localization. There is also no different between TR zones away and close.
+
+The current annotations of Tumor-rich and tumor-sparse is sufficient. 
+
+# Pathway analysis and GSEA - 
+
+## TC - GSEA
+
+### Genelist and FC calculation using paired data 
+
+```{r}
+library(fgsea)
+library(ReactomePA)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+conflicts_prefer(ReactomePA::dotplot)
+conflicts_prefer(base::intersect)
+
+#gene_sets <- read.gmt("h.all.v7.4.symbols.gmt")
+
+## Isolating the subsets
+
+### list of genes used for gsea
+ListCTA_TC <- DR_proteins_for_CTA_MTC_TRvsTS_paired #%>% 
+ # filter(DE=="DE")
+
+subMTC_TR <- CTA %>% 
+  filter(SegmentLabelNew=="MTC" & Within.the.tumor=="Tumor-rich" & PATID %in% paired_patCTA)  %>% 
+  select(any_of(ListCTA_TC$biomarker))
+
+subMTC_TS <- CTA %>% 
+  filter(SegmentLabelNew=="MTC" & Within.the.tumor=="Tumor-sparse"& PATID %in% paired_patCTA)  %>% 
+  select(any_of(ListCTA_TC$biomarker))
+
+
+### Performing T-test for group difference
+pvaluelist <- data.frame()
+for (i in ListCTA_TC$biomarker) {
+  testt <- t.test(subMTC_TR[,i], subMTC_TS[,i])
+  pvaluelist <- rbind(pvaluelist, cbind(i, testt$p.value))
+}
+
+### Calculating fold change in TR vsTS 
+
+subMTC_TR <- CTA %>% filter(SegmentLabelNew=="MTC"& Within.the.tumor=="Tumor-rich"& PATID %in% paired_patCTA) %>% select(any_of(ListCTA_TC$biomarker)) %>% t() %>% as.data.frame()
+subMTC_TS <- CTA %>% filter(SegmentLabelNew=="MTC"& Within.the.tumor=="Tumor-sparse"& PATID %in% paired_patCTA) %>% select(any_of(ListCTA_TC$biomarker)) %>% t() %>% as.data.frame()
+
+mean_expr_MTC_TR <- apply(subMTC_TR, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+mean_expr_MTC_TS <- apply(subMTC_TS, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+
+fold_change <- mean_expr_MTC_TR / mean_expr_MTC_TS 
+fold_change <- data.frame(Log2_Ratios = log2(fold_change))%>% rownames_to_column("TargetName")
+genenames <- read_excel("Datafiles/geneIDs.xlsx") 
+
+fold_change$TargetName[fold_change$TargetName == "PLK1.y"] <- "PLK1"
+fold_change$TargetName[fold_change$TargetName == "KIR.Family"] <- "KIR.Family"
+
+fold_change <- fold_change  %>% left_join(genenames %>% select(TargetName, GeneID), by = "TargetName") %>% left_join(pvaluelist, by = c("TargetName"="i"))  %>% as.data.frame() %>% mutate(logp  = log2(1/as.numeric(as.character(V2))))
+```
+
+#### GO
+
+```{r}
+geneList = fold_change[,2]
+names(geneList) = as.character(fold_change[,3])
+geneList = sort(geneList, decreasing = TRUE)
+
+gsea_results <- gseGO(
+  geneList = geneList,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pvalueCutoff = 0.05
+  #nPerm = 10000
+)
+
+require(DOSE)
+ReactomePA::dotplot(gsea_results, split=".sign") + facet_grid(.~.sign)+ theme(axis.text.y = element_text(size=8))
+```
+
+### KEGG
+
+```{r}
+set.seed(42)
+geneList = fold_change[,2]
+names(geneList) = as.character(fold_change[,3])
+geneList = sort(geneList, decreasing = TRUE)
+
+kk <- gseKEGG(geneList     = geneList,
+              organism = "hsa",
+              #nPerm        = 10000,
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "none",
+               keyType       = "ncbi-geneid")
+
+ReactomePA::dotplot(kk, showCategory = 10, title = "Enriched Pathways in TC in tumor-rich vs -sparse" , split=".sign", font.size = 6) + facet_grid(.~.sign) + theme(axis.text.y = element_text(size=6))
+
+library(enrichplot)
+gseaplot2(kk, geneSetID = 1:3, title = kk$Description["PD-L1 expression and PD-1 checkpoint pathway in cancer"], pvalue_table = TRUE)
+
+df <- as.data.frame(kk)
+
+df.sp <- separate(df, core_enrichment, into = paste0("Value_", 1:1500), sep = "/") %>%
+  select(where(~!all(is.na(.))))%>%
+  mutate(across(starts_with("Value"),  ~ if_else(. %in% fold_change$GeneID, fold_change$TargetName[match(., fold_change$GeneID)], .)))
+
+# View the result
+print(df.sp)
+
+#writexl::write_xlsx(df.sp, "Final Images used for publication/GSEA kegg output MTC TR over TS.xlsx")
+
+```
+
+
+```{r}
+library(pathview)
+
+# Produce the native KEGG plot (PNG)
+dme <- pathview(gene.data=geneList, pathway.id="hsa04668", species = "hsa", 
+                      kegg.native = F)
+
+knitr::include_graphics("hsa04668.pathview.png")
+
+dme <- pathview(gene.data=geneList, pathway.id="hsa04668", species = "hsa", 
+                      kegg.native = T)
+
+knitr::include_graphics("hsa04668.pathview.png")
+```
+
+### MSigDB
+
+#### C6
+
+```{r}
+t2g <- msigdbr(species = "Homo sapiens", category = "C6") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign") + facet_grid(.~.sign)+ theme(axis.text.y = element_text(size=8))
+```
+#### C3
+
+```{r}
+t2g <- msigdbr(species = "Homo sapiens", category = "C3") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign") + facet_grid(.~.sign) + theme(axis.text.y = element_text(size=8))
+```
+
+#### H
+
+```{r}
+t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign", font.size = 8) + facet_grid(.~.sign)
+```
+
+## TH - GSEA
+
+### Genelist and FC calculation using paired data 
+
+```{r}
+library(fgsea)
+library(ReactomePA)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+conflicts_prefer(ReactomePA::dotplot)
+conflicts_prefer(base::intersect)
+
+#gene_sets <- read.gmt("h.all.v7.4.symbols.gmt")
+
+## Isolating the subsets
+
+### list of genes used for gsea
+LisTHTA_TH <- DR_proteins_for_CTA_MTH_TRvsTS_paired #%>% 
+ # filter(DE=="DE")
+
+subMTH_TR <- CTA %>% 
+  filter(SegmentLabelNew=="MTH" & Within.the.tumor=="Tumor-rich"& PATID %in% paired_patCTA)  %>% 
+  select(any_of(LisTHTA_TH$biomarker))
+
+subMTH_TS <- CTA %>% 
+  filter(SegmentLabelNew=="MTH" & Within.the.tumor=="Tumor-sparse"& PATID %in% paired_patCTA)  %>% 
+  select(any_of(LisTHTA_TH$biomarker))
+
+
+### Performing T-test for group difference
+pvaluelist <- data.frame()
+for (i in LisTHTA_TH$biomarker) {
+  testt <- t.test(subMTH_TR[,i], subMTH_TS[,i])
+  pvaluelist <- rbind(pvaluelist, cbind(i, testt$p.value))
+}
+
+### Calculating fold change in TR vsTS 
+
+subMTH_TR <- CTA %>% filter(SegmentLabelNew=="MTH"& Within.the.tumor=="Tumor-rich"& PATID %in% paired_patCTA) %>% select(any_of(LisTHTA_TH$biomarker)) %>% t() %>% as.data.frame()
+subMTH_TS <- CTA %>% filter(SegmentLabelNew=="MTH"& Within.the.tumor=="Tumor-sparse"& PATID %in% paired_patCTA) %>% select(any_of(LisTHTA_TH$biomarker)) %>% t() %>% as.data.frame()
+
+mean_expr_MTH_TR <- apply(subMTH_TR, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+mean_expr_MTH_TS <- apply(subMTH_TS, 1, function(row) prod(row)^(1/length(row))) %>% as.data.frame()
+
+fold_change <- mean_expr_MTH_TR / mean_expr_MTH_TS 
+fold_change <- data.frame(Log2_Ratios = log2(fold_change))%>% rownames_to_column("TargetName")
+genenames <- read_excel("Datafiles/geneIDs.xlsx") 
+
+fold_change$TargetName[fold_change$TargetName == "PLK1.y"] <- "PLK1"
+fold_change$TargetName[fold_change$TargetName == "KIR.Family"] <- "KIR.Family"
+
+fold_change <- fold_change  %>% left_join(genenames %>% select(TargetName, GeneID), by = "TargetName") %>% left_join(pvaluelist, by = c("TargetName"="i"))  %>% as.data.frame() %>% mutate(logp  = log2(1/as.numeric(as.character(V2))))
+```
+
+#### GO
+
+```{r}
+geneList = fold_change[,2]
+names(geneList) = as.character(fold_change[,3])
+geneList = sort(geneList, decreasing = TRUE)
+
+gsea_results <- gseGO(
+  geneList = geneList,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pvalueCutoff = 0.05
+  #nPerm = 10000
+)
+
+require(DOSE)
+ReactomePA::dotplot(gsea_results, split=".sign") + facet_grid(.~.sign)+ theme(axis.text.y = element_text(size=8))
+```
+
+### KEGG
+
+```{r, fig.width=8, fig.height=8}
+geneList = fold_change[,2]
+names(geneList) = as.character(fold_change[,3])
+geneList = sort(geneList, decreasing = TRUE)
+
+set.seed(42)
+kk2 <- gseKEGG(geneList     = geneList,
+              #nPerm        = 10000,
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "none",
+               keyType       = "ncbi-geneid")
+
+ReactomePA::dotplot(kk2, showCategory = 50, title = "Enriched Pathways in TH in tumor-rich vs -sparse" , split=".sign", font.size = 6) + facet_grid(.~.sign) + theme(axis.text.y = element_text(size=8))
+
+df <- as.data.frame(kk2)
+
+df.sp <- separate(df, core_enrichment, into = paste0("Value_", 1:1500), sep = "/") %>%
+  select(where(~!all(is.na(.))))%>%
+  mutate(across(starts_with("Value"),  ~ if_else(. %in% fold_change$GeneID, fold_change$TargetName[match(., fold_change$GeneID)], .)))
+
+# View the result
+print(df.sp)
+
+writexl::write_xlsx(df.sp, "Final Images used for publication/GSEA kegg output MTH TR over TS.xlsx")
+```
+
+```{r}
+library(pathview)
+
+# Produce the native KEGG plot (PNG)
+dme <- pathview(gene.data=geneList, pathway.id="hsa05235", species = "hsa", 
+                      kegg.native = T)
+
+
+knitr::include_graphics("hsa05235.pathview.png")
+
+dme <- pathview(gene.data=geneList, pathway.id="hsa04512", species = "hsa", 
+                      kegg.native = T)
+
+knitr::include_graphics("hsa04512.pathview.png")
+
+
+dme <- pathview(gene.data=geneList, pathway.id="hsa00562", species = "hsa", 
+                      kegg.native = T)
+
+knitr::include_graphics("hsa00562.pathview.png")
+
+dme <- pathview(gene.data=geneList, pathway.id="hsa04070", species = "hsa", 
+                      kegg.native = T)
+
+knitr::include_graphics("hsa04070.pathview.png")
+```
+
+
+### MSigDB
+
+#### C6
+
+```{r}
+t2g <- msigdbr(species = "Homo sapiens", category = "C6") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign") + facet_grid(.~.sign)+ theme(axis.text.y = element_text(size=8))
+```
+#### C3
+
+```{r}
+t2g <- msigdbr(species = "Homo sapiens", category = "C3") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign") + facet_grid(.~.sign) + theme(axis.text.y = element_text(size=8))
+```
+
+#### H
+
+```{r}
+t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+head(t2g)
+
+em2 <- GSEA(geneList, TERM2GENE = t2g, pAdjustMethod = "none")
+head(em2)
+
+dotplot(em2, showCategory=30, split=".sign", font.size = 8) + facet_grid(.~.sign)
+```
+
+### Combining keggs
+
+```{r}
+# Combine the GSEA results from both studies (assuming they have similar structures)
+# Extract necessary information from GSEA results
+data_kk <- as.data.frame(kk)
+data_kk2 <- as.data.frame(kk2)
+
+# Add identifiers for different studies
+data_kk$Study <- "MTC"
+data_kk2$Study <- "MTH"
+
+# Combine the relevant information (e.g., pathways, p-values) into a single data frame
+combined_results <- rbind(data_kk, data_kk2) %>% mutate(Sign = ifelse(NES <0, "Enriched in Tumor-Sparse", "Enriched in Tumor-rich"))
+
+listid <- c("B cell receptor signaling pathway", 
+            "T cell receptor signaling pathway", 
+            "Cytokine-cytokine receptor interaction", 
+            "PD-L1 expression and PD-1 checkpoint pathway in cancer", 
+            "Antigen processing and presentation",
+            "Th1 and Th2 cell differentiation", 
+            "Th17 cell differentiation", 
+            "Neutrophil extracellular trap formation", 
+            "Fc gamma R-mediated phagocytosis", 
+            "Protein digestion and absorption",  
+            "TNF signaling pathway", 
+            "ECM-receptor interaction",
+            "DNA replication", 
+            "Complement and coagulation cascades" , 
+            "TNF signaling pathway", 
+            "Mismatch repair", 
+            "Adherens junction",
+            "Cell cycle",
+            "Fatty acid degradation", 
+            "JAK-STAT signaling pathway", 
+            "Chemokine signaling pathway",
+            "Complement and coagulation cascades",
+            "Protein digestion and absorption", 
+            "PI3K-Akt signaling pathway",
+            "Inositol phosphate metabolism",
+            "Hematopoietic cell lineage",
+            "Phosphatidylinositol signaling system",
+            "Phagosome",
+            "Nucleotide excision repair"
+            )
+
+my_palette <- colorRampPalette(brewer.pal(11, "RdBu"))(10)
+# 
+# p1 <- gseaplot(kk, geneSetID = 1, by = "runningScore", title = kk$Description["PD-L1 expression and PD-1 checkpoint pathway in cancer"])
+# p2 <- gseaplot(kk2, geneSetID = 1, by = "runningScore", title = kk2$Description["PD-L1 expression and PD-1 checkpoint pathway in cancer"])
+# 
+# cowplot::plot_grid(p1, p2, ncol = 1, labels=LETTERS[1:2])
+# 
+# 
+# combined_results %>% filter(Description == c("B cell receptor signaling pathway", "T cell receptor signaling pathway", "Cytokine-cytokine receptor interaction"))
+# 
+# names(data_kk)
+```
+
+```{r, fig.width=11, fig.height=5}
+# Create a dot plot using ggplot2
+plot <- combined_results %>% 
+  filter(Description %in% listid) %>% 
+  mutate("-log10(pvalue)" = -log10(pvalue)) %>% 
+  ggplot(aes(x = Sign, y = Description, stroke = 1)) +
+  facet_wrap(~Study, ncol = 4)+
+ # geom_point(shape = 21, aes(size = -`-log10(pvalue)`, fill = `-log10(pvalue)`)) +
+  geom_point(shape = 21, aes(size = abs(NES), fill = p.adjust), alpha = 0.8) +
+  labs(title = "Selected Enriched Pathways Comparison using KEGG",
+       x = "",
+       y = "") +
+  theme_light()+
+  theme(plot.title = element_text(size=12), strip.text = element_text(color = "black"),  # Change facet label color
+  strip.background = element_rect(color = "black", fill = "lightgray", size = 1) ) +
+  scale_fill_manual(
+    values = c(NA, "black"),
+    guide = guide_legend(override.aes = list(shape = 21))
+  )+
+  scale_fill_gradientn(colors=my_palette)
+plot
+pdf("Final Images used for publication/GSEA plot TR vs TS.pdf")
+plot
+dev.off()
+```
+```{r}
+#install.packages("VennDiagram")
+library(VennDiagram)
+
+DR_proteins_for_CTA_MTC_TRvsTS_paired
+DR_proteins_for_CTA_MTH_TRvsTS_paired
+```
+
